@@ -1,0 +1,19 @@
+services:
+  forti-socks:
+    build: .
+    container_name: forti-socks
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/ppp:/dev/ppp
+    ports:
+      - "1080:1080"
+    environment:
+      FORTI_HOST: ${FORTI_HOST}
+      FORTI_PORT: ${FORTI_PORT:-443}
+      FORTI_USER: ${FORTI_USER}
+      FORTI_PASS: ${FORTI_PASS}
+      FORTI_TRUSTED_CERT: ${FORTI_TRUSTED_CERT:-}
+      FORTI_REALM: ${FORTI_REALM:-}
+      FORTI_OTP: ${FORTI_OTP:-}
+    restart: unless-stopped
