@@ -164,15 +164,17 @@ The script automatically sets this file as the macOS system proxy on `./split.sh
 After a successful `./split.sh start`, verify the tunnel is working:
 
 ```bash
-# Test SOCKS proxy directly
+# Test SOCKS proxy directly (bypasses tun2socks, goes straight through the proxy)
 curl --socks5-hostname 127.0.0.1:1080 https://internal-app.example.com
 
 # Test DNS resolution through the tunnel (if VPN_DOMAINS is set)
-nslookup internal-app.example.com
+# Note: use dscacheutil, not nslookup — nslookup ignores /etc/resolver on macOS
+dscacheutil -q host -a name internal-app.example.com
 
 # With tun2socks active, regular commands just work
 ssh user@internal-server.example.com
 git clone git@internal-git.example.com:repo.git
+curl http://internal-app.example.com
 ```
 
 ## Useful commands
@@ -201,9 +203,10 @@ git clone git@internal-git.example.com:repo.git
 
 ### tun2socks not working
 
-- Verify it's installed: `which tun2socks`
+- Verify it's installed: `ls ~/go/bin/tun2socks` (or `which tun2socks` if it's in your PATH)
+- The script checks `~/go/bin` and `/usr/local/bin` automatically
 - The script needs `sudo` to create the tunnel interface — you'll be prompted for your password
-- Check that `VPN_ROUTES` is set in `.env`
+- Check that `VPN_ROUTES`, `VPN_DNS`, and `VPN_DOMAINS` are all set in `.env`
 
 ### Connection drops / container exits
 

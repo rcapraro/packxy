@@ -3,7 +3,7 @@ set -eu
 cd "$(dirname "$0")"
 
 # ===========================================================================
-#  Forti SOCKS — split-tunneling manager for macOS
+#  Packxy — split-tunneling manager for macOS
 #
 #  Two modes (selected automatically):
 #    1. tun2socks  — true network-level routing (ALL protocols: SSH, Git, …)
@@ -15,6 +15,7 @@ cd "$(dirname "$0")"
 PAC_FILE="${PAC_FILE:-$HOME/Proxy/packsolutions.pac}"
 PAC_URL="file://${PAC_FILE}"
 STATE_DIR="/tmp/forti-socks"
+VPN_ERROR_PATTERNS='Could not authenticate to gateway|Authentication failed|Invalid OTP|OTP required|Connection failed|check the password, client certificate|Invalid password|Certificate error|Gateway unreachable|VPN process terminated unexpectedly|VPN did not create ppp0'
 
 # --- Load .env defaults ---
 load_env() {
@@ -76,11 +77,10 @@ find_tun2socks() {
 }
 
 has_tun2socks() { find_tun2socks >/dev/null 2>&1; }
-TUN2SOCKS_BIN=""
 
 # Start tun2socks and configure IP routing + DNS
 start_tunnel() {
-  local before after tun_dev
+  local before after tun_dev tun2socks_bin ifs_save
 
   mkdir -p "$STATE_DIR"
 
@@ -88,8 +88,8 @@ start_tunnel() {
   before=$(ifconfig -l)
 
   # Start tun2socks (creates a utun device routed through the SOCKS proxy)
-  TUN2SOCKS_BIN=$(find_tun2socks)
-  sudo "$TUN2SOCKS_BIN" -device utun -proxy socks5://127.0.0.1:1080 >/dev/null 2>&1 &
+  tun2socks_bin=$(find_tun2socks)
+  sudo "$tun2socks_bin" -device utun -proxy socks5://127.0.0.1:1080 >/dev/null 2>&1 &
   echo $! | sudo tee "$STATE_DIR/tun2socks.pid" >/dev/null
 
   # Give tun2socks time to create the interface
@@ -113,24 +113,24 @@ start_tunnel() {
   sudo ifconfig "$tun_dev" 198.18.0.1 198.18.0.1 up
 
   # --- Add routes for internal networks ---
-  local IFS_SAVE="$IFS"
+  ifs_save="$IFS"
   IFS=','
   for route in ${VPN_ROUTES}; do
-    IFS="$IFS_SAVE"
+    IFS="$ifs_save"
     route=$(echo "$route" | xargs)          # trim whitespace
     [ -z "$route" ] && continue
     sudo route -q add -net "$route" -interface "$tun_dev" 2>/dev/null || true
     echo "$route" >> "$STATE_DIR/routes"
   done
-  IFS="$IFS_SAVE"
+  IFS="$ifs_save"
 
   # --- Configure split DNS via /etc/resolver ---
   if [ -n "${VPN_DNS:-}" ] && [ -n "${VPN_DOMAINS:-}" ]; then
     sudo mkdir -p /etc/resolver
-    local IFS_SAVE="$IFS"
+    ifs_save="$IFS"
     IFS=','
     for domain in ${VPN_DOMAINS}; do
-      IFS="$IFS_SAVE"
+      IFS="$ifs_save"
       domain=$(echo "$domain" | xargs)
       [ -z "$domain" ] && continue
       if echo "nameserver ${VPN_DNS}" | sudo tee "/etc/resolver/${domain}" >/dev/null; then
@@ -139,7 +139,7 @@ start_tunnel() {
         gum style --foreground 9 "Failed to create /etc/resolver/${domain}"
       fi
     done
-    IFS="$IFS_SAVE"
+    IFS="$ifs_save"
   fi
 
   gum style --foreground 10 "Network-level split tunneling active on ${tun_dev}"
@@ -166,7 +166,7 @@ stop_tunnel() {
 # ========================  Commands  =======================================
 
 usage() {
-  echo "Usage: split start | split stop"
+  echo "Usage: ./split.sh start | ./split.sh stop"
   echo ""
   echo "  start   Connect to VPN and enable split tunneling"
   echo "  stop    Disconnect VPN and remove split tunneling"
@@ -180,7 +180,7 @@ cmd_stop() {
   docker compose down
   gum style \
     --foreground 10 --border-foreground 10 --border double \
-    --align center --width 50 --margin "1 2" --padding "1 2" \
+    --align center --width 56 --margin "1 2" --padding "1 2" \
     "STOPPED" "VPN container removed and split tunneling disabled."
   exit 0
 }
@@ -203,8 +203,10 @@ cmd_start() {
 
   gum style \
     --foreground 212 --border-foreground 212 --border double \
-    --align center --width 50 --margin "1 2" --padding "2 4" \
-    "VPN Proxy Setup" "Enter your FortiGate credentials"
+    --align center --width 56 --margin "1 2" --padding "1 2" \
+    "Packxy" "Enter your FortiGate credentials"
+
+  echo ""
 
   # --- Interactive credential prompts (defaults from .env) ---
   FORTI_HOST=$(gum input --header "VPN Hostname" --placeholder "vpn.company.com" --value "${FORTI_HOST:-}")
@@ -228,10 +230,16 @@ cmd_start() {
   done
   export FORTI_OTP
 
-  FORTI_TRUSTED_CERT=$(gum input --header "Trusted Certificate (Optional)" --placeholder "sha256 fingerprint..." --value "${FORTI_TRUSTED_CERT:-}")
+  if [ -z "${FORTI_TRUSTED_CERT:-}" ]; then
+    FORTI_TRUSTED_CERT=$(gum input --header "Trusted Certificate (Optional)" --placeholder "sha256 fingerprint...")
+  fi
   export FORTI_TRUSTED_CERT
 
-  FORTI_REALM=$(gum input --header "Realm (Optional)" --placeholder "Staff" --value "${FORTI_REALM:-}")
+  if [ -z "${FORTI_REALM:-}" ]; then
+    :  # no realm configured — skip prompt
+  else
+    FORTI_REALM=$(gum input --header "Realm" --value "${FORTI_REALM}")
+  fi
   export FORTI_REALM
 
   echo ""
@@ -240,7 +248,7 @@ cmd_start() {
   if ! gum spin --spinner dot --title "Starting VPN container..." -- docker compose up -d; then
     gum style \
       --foreground 9 --border-foreground 9 --border double \
-      --align center --width 50 --margin "1 2" --padding "1 2" \
+      --align center --width 56 --margin "1 2" --padding "1 2" \
       "FAILURE" "Could not start the VPN container." \
       "Please check if docker compose is installed and configured."
     exit 1
@@ -252,7 +260,7 @@ cmd_start() {
   if [ "$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo 'notfound')" = "notfound" ]; then
     gum style \
       --foreground 9 --border-foreground 9 --border double \
-      --align center --width 50 --margin "1 2" --padding "1 2" \
+      --align center --width 56 --margin "1 2" --padding "1 2" \
       "FAILURE" "Container not found. Check docker compose configuration."
     exit 1
   fi
@@ -261,7 +269,7 @@ cmd_start() {
   VPN_CONNECTED=false
 
   gum spin --spinner dot --title "Waiting for VPN connection..." -- bash -c "
-    ERROR_PAT='Could not authenticate to gateway|Authentication failed|Invalid OTP|OTP required|Connection failed|check the password, client certificate|Invalid password|Certificate error|Gateway unreachable|VPN process terminated unexpectedly|VPN did not create ppp0'
+    ERROR_PAT='$VPN_ERROR_PATTERNS'
     for i in {1..40}; do
       STATUS=\$(docker inspect -f '{{.State.Status}}' $CONTAINER_NAME 2>/dev/null || echo 'unknown')
       if [ \"\$STATUS\" = \"exited\" ]; then
@@ -280,9 +288,8 @@ cmd_start() {
 
   # --- Handle connection failure ---
   if [ "$VPN_CONNECTED" != true ]; then
-    ERROR_PATTERNS="Could not authenticate to gateway|Authentication failed|Invalid OTP|OTP required|Connection failed|check the password, client certificate|Invalid password|Certificate error|Gateway unreachable|VPN process terminated unexpectedly|VPN did not create ppp0"
     LOGS=$(docker logs --tail 50 "$CONTAINER_NAME" 2>&1 || true)
-    VPN_ERROR=$(echo "$LOGS" | grep -iE "$ERROR_PATTERNS" | tail -n 3 || true)
+    VPN_ERROR=$(echo "$LOGS" | grep -iE "$VPN_ERROR_PATTERNS" | tail -n 3 || true)
 
     if [ -z "$VPN_ERROR" ]; then
       VPN_ERROR=$(echo "$LOGS" | grep -iE "ERROR:|error:|fatal" | tail -n 3 || true)
@@ -294,7 +301,7 @@ cmd_start() {
     echo ""
     gum style \
       --foreground 9 --border-foreground 9 --border double \
-      --align center --width 50 --margin "1 2" --padding "1 2" \
+      --align center --width 56 --margin "1 2" --padding "1 2" \
       "FAILURE" "VPN connection failed"
     echo ""
     gum style --foreground 9 --bold "Error details:"
@@ -316,7 +323,7 @@ cmd_start() {
     if start_tunnel; then
       gum style \
         --foreground 10 --border-foreground 10 --border double \
-        --align center --width 60 --margin "1 2" --padding "1 2" \
+        --align center --width 56 --margin "1 2" --padding "1 2" \
         "SUCCESS" "" \
         "VPN connected — all protocols routed"
       echo ""
@@ -325,15 +332,16 @@ cmd_start() {
       gum style --foreground 7 "  to the configured VPN routes."
       echo ""
       gum style --foreground 10 --bold "Routed networks:"
-      local IFS=','
-      for r in ${VPN_ROUTES}; do
+      IFS=',' read -ra _routes <<< "$VPN_ROUTES"
+      for r in "${_routes[@]}"; do
         r=$(echo "$r" | xargs)
         [ -n "$r" ] && gum style --foreground 7 "  $r"
       done
       if [ -n "${VPN_DOMAINS:-}" ]; then
         echo ""
         gum style --foreground 10 --bold "Split DNS domains:"
-        for d in ${VPN_DOMAINS}; do
+        IFS=',' read -ra _domains <<< "$VPN_DOMAINS"
+        for d in "${_domains[@]}"; do
           d=$(echo "$d" | xargs)
           [ -n "$d" ] && gum style --foreground 7 "  $d"
         done
@@ -348,7 +356,7 @@ cmd_start() {
       enable_pac_proxy && PAC_OK=true || true
       gum style \
         --foreground 11 --border-foreground 11 --border double \
-        --align center --width 60 --margin "1 2" --padding "1 2" \
+        --align center --width 56 --margin "1 2" --padding "1 2" \
         "PARTIAL" "" \
         "VPN connected — tun2socks failed"
       echo ""
@@ -377,7 +385,7 @@ cmd_start() {
     if [ "$PAC_OK" = true ]; then
       gum style \
         --foreground 10 --border-foreground 10 --border double \
-        --align center --width 60 --margin "1 2" --padding "1 2" \
+        --align center --width 56 --margin "1 2" --padding "1 2" \
         "SUCCESS" "" \
         "VPN connected — browser proxy active"
       echo ""
@@ -386,7 +394,7 @@ cmd_start() {
     else
       gum style \
         --foreground 11 --border-foreground 11 --border double \
-        --align center --width 60 --margin "1 2" --padding "1 2" \
+        --align center --width 56 --margin "1 2" --padding "1 2" \
         "SUCCESS" "" \
         "VPN connected — SOCKS proxy available on :1080"
       echo ""
