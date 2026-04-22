@@ -210,8 +210,9 @@ curl http://internal-app.example.com
 
 ### Connection drops / container exits
 
-- The container does **not** auto-restart — this is intentional to avoid account lockout from repeated failed logins
-- Simply run `./split.sh start` again with a fresh OTP
+- If the VPN drops after a successful connection, the container automatically reconnects (up to 5 attempts, 30 seconds apart)
+- If the initial connection fails (wrong password, expired OTP), the container exits immediately — no retry, to avoid account lockout
+- After max retries are exhausted, run `./split.sh start` again with a fresh OTP
 
 ## Project files
 

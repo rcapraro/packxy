@@ -17,6 +17,32 @@ PAC_URL="file://${PAC_FILE}"
 STATE_DIR="/tmp/forti-socks"
 VPN_ERROR_PATTERNS='Could not authenticate to gateway|Authentication failed|Invalid OTP|OTP required|Connection failed|check the password, client certificate|Invalid password|Certificate error|Gateway unreachable|VPN process terminated unexpectedly|VPN did not create ppp0'
 
+# --- UI helpers ---
+step_ok()   { gum style --foreground 10 "  ✔  $1"; }
+step_fail() { gum style --foreground 9  "  ✖  $1"; }
+step_warn() { gum style --foreground 11 "  !  $1"; }
+step_info() { gum style --foreground 8  "     $1"; }
+
+banner() {
+  local color="$1" title="$2" subtitle="${3:-}"
+  if [ -n "$subtitle" ]; then
+    gum style \
+      --foreground "$color" --border-foreground "$color" --border double \
+      --align center --width 56 --margin "1 2" --padding "1 2" \
+      "$title" "" "$subtitle"
+  else
+    gum style \
+      --foreground "$color" --border-foreground "$color" --border double \
+      --align center --width 56 --margin "1 2" --padding "1 2" \
+      "$title"
+  fi
+}
+
+summary_line() {
+  local label="$1" value="$2"
+  printf "  %-10s %s\n" "$label" "$value"
+}
+
 # --- Load .env defaults ---
 load_env() {
   if [ -f .env ]; then
@@ -29,13 +55,10 @@ load_env() {
 
 # ========================  macOS network helpers  ==========================
 
-# Get the active network service name (e.g. "Wi-Fi", "Ethernet")
 get_active_service() {
   local route_iface
   route_iface=$(route -n get default 2>/dev/null | awk '/interface:/ {print $2}')
-  if [ -z "$route_iface" ]; then
-    return 1
-  fi
+  [ -z "$route_iface" ] && return 1
   networksetup -listallhardwareports | awk -v dev="$route_iface" '
     /^Hardware Port:/ { port = substr($0, index($0,":")+2) }
     /^Device:/ && $2 == dev { print port; exit }
@@ -47,24 +70,19 @@ get_active_service() {
 enable_pac_proxy() {
   local service
   service=$(get_active_service) || return 1
-  if [ ! -f "$PAC_FILE" ]; then
-    return 1
-  fi
+  [ ! -f "$PAC_FILE" ] && return 1
   networksetup -setautoproxyurl "$service" "$PAC_URL"
   networksetup -setautoproxystate "$service" on
-  gum style --foreground 10 "Automatic proxy enabled on ${service} → ${PAC_URL}"
 }
 
 disable_pac_proxy() {
   local service
   service=$(get_active_service) || return 0
   networksetup -setautoproxystate "$service" off
-  gum style --foreground 8 "Automatic proxy disabled on ${service}"
 }
 
 # ========================  tun2socks routing  ==============================
 
-# Look for tun2socks in PATH and common install locations
 find_tun2socks() {
   command -v tun2socks 2>/dev/null && return
   for candidate in "$HOME/go/bin/tun2socks" /usr/local/bin/tun2socks; do
@@ -78,89 +96,93 @@ find_tun2socks() {
 
 has_tun2socks() { find_tun2socks >/dev/null 2>&1; }
 
-# Start tun2socks and configure IP routing + DNS
-start_tunnel() {
-  local before after tun_dev tun2socks_bin ifs_save
+# Split into discrete steps so the caller can show progress per step.
 
+tunnel_create_interface() {
+  local before after tun2socks_bin
   mkdir -p "$STATE_DIR"
 
-  # Snapshot current interfaces
   before=$(ifconfig -l)
 
-  # Start tun2socks (creates a utun device routed through the SOCKS proxy)
   tun2socks_bin=$(find_tun2socks)
   sudo "$tun2socks_bin" -device utun -proxy socks5://127.0.0.1:1080 >/dev/null 2>&1 &
-  echo $! | sudo tee "$STATE_DIR/tun2socks.pid" >/dev/null
+  echo $! > "$STATE_DIR/tun2socks.pid"
 
-  # Give tun2socks time to create the interface
   sleep 2
 
-  # Discover the new utun device
   after=$(ifconfig -l)
-  tun_dev=$(comm -13 <(echo "$before" | tr ' ' '\n' | sort) \
-                     <(echo "$after"  | tr ' ' '\n' | sort) \
-            | grep '^utun' | head -1)
+  TUNNEL_DEV=$(comm -13 <(echo "$before" | tr ' ' '\n' | sort) \
+                        <(echo "$after"  | tr ' ' '\n' | sort) \
+               | grep '^utun' | head -1)
 
-  if [ -z "$tun_dev" ]; then
-    gum style --foreground 9 "Failed to create tun device — is tun2socks working?"
+  if [ -z "$TUNNEL_DEV" ]; then
     stop_tunnel 2>/dev/null || true
     return 1
   fi
 
-  echo "$tun_dev" > "$STATE_DIR/tun_dev"
+  echo "$TUNNEL_DEV" > "$STATE_DIR/tun_dev"
+  sudo ifconfig "$TUNNEL_DEV" 198.18.0.1 198.18.0.1 up 2>/dev/null
+}
 
-  # Bring the interface up with a carrier-grade NAT address (never routed on the internet)
-  sudo ifconfig "$tun_dev" 198.18.0.1 198.18.0.1 up
-
-  # --- Add routes for internal networks ---
-  ifs_save="$IFS"
+tunnel_add_routes() {
+  TUNNEL_ROUTES_ADDED=""
+  local ifs_save="$IFS"
   IFS=','
   for route in ${VPN_ROUTES}; do
     IFS="$ifs_save"
-    route=$(echo "$route" | xargs)          # trim whitespace
+    route=$(echo "$route" | xargs)
     [ -z "$route" ] && continue
-    sudo route -q add -net "$route" -interface "$tun_dev" 2>/dev/null || true
+    sudo route -q add -net "$route" -interface "$TUNNEL_DEV" >/dev/null 2>&1 || true
     echo "$route" >> "$STATE_DIR/routes"
+    TUNNEL_ROUTES_ADDED="${TUNNEL_ROUTES_ADDED:+$TUNNEL_ROUTES_ADDED, }$route"
   done
   IFS="$ifs_save"
-
-  # --- Configure split DNS via /etc/resolver ---
-  if [ -n "${VPN_DNS:-}" ] && [ -n "${VPN_DOMAINS:-}" ]; then
-    sudo mkdir -p /etc/resolver
-    ifs_save="$IFS"
-    IFS=','
-    for domain in ${VPN_DOMAINS}; do
-      IFS="$ifs_save"
-      domain=$(echo "$domain" | xargs)
-      [ -z "$domain" ] && continue
-      if echo "nameserver ${VPN_DNS}" | sudo tee "/etc/resolver/${domain}" >/dev/null; then
-        echo "$domain" >> "$STATE_DIR/domains"
-      else
-        gum style --foreground 9 "Failed to create /etc/resolver/${domain}"
-      fi
-    done
-    IFS="$ifs_save"
-  fi
-
-  gum style --foreground 10 "Network-level split tunneling active on ${tun_dev}"
 }
 
-# Tear down tun2socks, routes (auto-removed with interface), and DNS
+tunnel_configure_dns() {
+  TUNNEL_DOMAINS_ADDED=""
+  [ -z "${VPN_DNS:-}" ] || [ -z "${VPN_DOMAINS:-}" ] && return 0
+
+  sudo mkdir -p /etc/resolver 2>/dev/null
+  local ifs_save="$IFS"
+  IFS=','
+  for domain in ${VPN_DOMAINS}; do
+    IFS="$ifs_save"
+    domain=$(echo "$domain" | xargs)
+    [ -z "$domain" ] && continue
+    if echo "nameserver ${VPN_DNS}" | sudo tee "/etc/resolver/${domain}" >/dev/null 2>&1; then
+      echo "$domain" >> "$STATE_DIR/domains"
+      TUNNEL_DOMAINS_ADDED="${TUNNEL_DOMAINS_ADDED:+$TUNNEL_DOMAINS_ADDED, }$domain"
+    fi
+  done
+  IFS="$ifs_save"
+}
+
 stop_tunnel() {
-  # Kill tun2socks (removes the utun device and its routes automatically)
   if [ -f "$STATE_DIR/tun2socks.pid" ]; then
     sudo kill "$(cat "$STATE_DIR/tun2socks.pid")" 2>/dev/null || true
     rm -f "$STATE_DIR/tun2socks.pid"
   fi
-
-  # Remove /etc/resolver entries we created
   if [ -f "$STATE_DIR/domains" ]; then
     while IFS= read -r domain; do
       sudo rm -f "/etc/resolver/${domain}"
     done < "$STATE_DIR/domains"
   fi
-
   rm -rf "$STATE_DIR"
+}
+
+# Globals set by tunnel steps
+TUNNEL_DEV=""
+TUNNEL_ROUTES_ADDED=""
+TUNNEL_DOMAINS_ADDED=""
+
+extract_vpn_error() {
+  local container="$1" logs error
+  logs=$(docker logs --tail 50 "$container" 2>&1 || true)
+  error=$(echo "$logs" | grep -iE "$VPN_ERROR_PATTERNS" | tail -n 3 || true)
+  [ -z "$error" ] && error=$(echo "$logs" | grep -iE "ERROR:|error:|fatal" | tail -n 3 || true)
+  [ -z "$error" ] && error="Connection timed out or failed without a specific error."
+  echo "$error"
 }
 
 # ========================  Commands  =======================================
@@ -174,14 +196,19 @@ usage() {
 }
 
 cmd_stop() {
-  load_env
+  echo ""
   stop_tunnel 2>/dev/null || true
+  step_ok "Tunnel removed"
+
   disable_pac_proxy 2>/dev/null || true
-  docker compose down
-  gum style \
-    --foreground 10 --border-foreground 10 --border double \
-    --align center --width 56 --margin "1 2" --padding "1 2" \
-    "STOPPED" "VPN container removed and split tunneling disabled."
+  step_ok "Proxy disabled"
+
+  gum spin --spinner dot --title "  Stopping container..." -- \
+    bash -c "docker compose down >/dev/null 2>&1"
+  step_ok "Container stopped"
+
+  echo ""
+  banner 10 "Disconnected"
   exit 0
 }
 
@@ -190,259 +217,166 @@ cmd_start() {
 
   # --- Check prerequisites ---
   if ! command -v gum >/dev/null 2>&1; then
-    echo "Error: 'gum' is not installed. Please install it (e.g., 'brew install gum')." >&2
+    echo "Error: 'gum' is not installed (brew install gum)." >&2
     exit 1
   fi
 
-  # Pre-authenticate sudo early so the password prompt is clearly visible
-  # and credentials are cached for later tun2socks/DNS setup.
+  # Pre-authenticate sudo for tun2socks/DNS setup
   if has_tun2socks && [ -n "${VPN_ROUTES:-}" ]; then
-    echo "sudo access is needed for split tunneling (tunnel interface + DNS)."
+    step_info "sudo is needed for the tunnel interface and DNS entries."
     sudo -v || { echo "sudo authentication failed." >&2; exit 1; }
+    echo ""
   fi
 
-  gum style \
-    --foreground 212 --border-foreground 212 --border double \
-    --align center --width 56 --margin "1 2" --padding "1 2" \
-    "Packxy" "Enter your FortiGate credentials"
-
+  banner 212 "Packxy"
   echo ""
 
-  # --- Interactive credential prompts (defaults from .env) ---
-  FORTI_HOST=$(gum input --header "VPN Hostname" --placeholder "vpn.company.com" --value "${FORTI_HOST:-}")
+  # --- Credential prompts (defaults from .env) ---
+  FORTI_HOST=$(gum input --header "  VPN Hostname" --placeholder "vpn.company.com" --value "${FORTI_HOST:-}")
   export FORTI_HOST
 
-  FORTI_PORT=$(gum input --header "VPN Port" --placeholder "443" --value "${FORTI_PORT:-443}")
+  FORTI_PORT=$(gum input --header "  VPN Port" --placeholder "443" --value "${FORTI_PORT:-443}")
   export FORTI_PORT
 
-  FORTI_USER=$(gum input --header "Username" --placeholder "john.doe" --value "${FORTI_USER:-}")
+  FORTI_USER=$(gum input --header "  Username" --placeholder "john.doe" --value "${FORTI_USER:-}")
   export FORTI_USER
 
-  FORTI_PASS=$(gum input --password --header "Password or Password+Token" --placeholder "YourPassword123..." --value "${FORTI_PASS:-}")
+  FORTI_PASS=$(gum input --password --header "  Password" --placeholder "••••••••" --value "${FORTI_PASS:-}")
   export FORTI_PASS
 
   while true; do
-    FORTI_OTP=$(gum input --header "2FA OTP" --placeholder "123456" --value "${FORTI_OTP:-}")
-    if [[ "$FORTI_OTP" =~ ^[0-9]{6}$ ]]; then
-      break
-    fi
-    gum style --foreground 9 "Error: OTP must be exactly 6 digits and cannot be empty."
+    FORTI_OTP=$(gum input --header "  2FA Code" --placeholder "123456" --value "${FORTI_OTP:-}")
+    [[ "$FORTI_OTP" =~ ^[0-9]{6}$ ]] && break
+    gum style --foreground 9 "  Must be exactly 6 digits."
   done
   export FORTI_OTP
 
   if [ -z "${FORTI_TRUSTED_CERT:-}" ]; then
-    FORTI_TRUSTED_CERT=$(gum input --header "Trusted Certificate (Optional)" --placeholder "sha256 fingerprint...")
+    FORTI_TRUSTED_CERT=$(gum input --header "  Trusted Certificate (optional)" --placeholder "sha256 fingerprint...")
   fi
   export FORTI_TRUSTED_CERT
 
-  if [ -z "${FORTI_REALM:-}" ]; then
-    :  # no realm configured — skip prompt
-  else
-    FORTI_REALM=$(gum input --header "Realm" --value "${FORTI_REALM}")
+  if [ -n "${FORTI_REALM:-}" ]; then
+    FORTI_REALM=$(gum input --header "  Realm" --value "${FORTI_REALM}")
   fi
   export FORTI_REALM
 
   echo ""
 
-  # --- Start the container ---
-  if ! gum spin --spinner dot --title "Starting VPN container..." -- docker compose up -d; then
-    gum style \
-      --foreground 9 --border-foreground 9 --border double \
-      --align center --width 56 --margin "1 2" --padding "1 2" \
-      "FAILURE" "Could not start the VPN container." \
-      "Please check if docker compose is installed and configured."
+  # ---- Step 1: Start the container ----
+  if gum spin --spinner dot --title "  Starting container..." -- \
+       bash -c "docker compose up -d >/dev/null 2>&1"; then
+    step_ok "Container started"
+  else
+    step_fail "Container failed to start"
+    step_info "Run 'docker compose up -d' manually to see the error."
     exit 1
   fi
 
-  # Resolve container name
   CONTAINER_NAME=$(docker compose ps --format '{{.Name}}' forti-socks 2>/dev/null || echo "forti-socks")
 
-  if [ "$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo 'notfound')" = "notfound" ]; then
-    gum style \
-      --foreground 9 --border-foreground 9 --border double \
-      --align center --width 56 --margin "1 2" --padding "1 2" \
-      "FAILURE" "Container not found. Check docker compose configuration."
-    exit 1
-  fi
-
-  # --- Wait for VPN connection or failure ---
-  VPN_CONNECTED=false
-
-  gum spin --spinner dot --title "Waiting for VPN connection..." -- bash -c "
+  # ---- Step 2: Wait for VPN connection ----
+  if gum spin --spinner dot --title "  Connecting to VPN..." -- \
+       bash -c "
     ERROR_PAT='$VPN_ERROR_PATTERNS'
-    for i in {1..40}; do
-      STATUS=\$(docker inspect -f '{{.State.Status}}' $CONTAINER_NAME 2>/dev/null || echo 'unknown')
-      if [ \"\$STATUS\" = \"exited\" ]; then
-        exit 1
-      fi
-      if docker exec $CONTAINER_NAME ip link show ppp0 >/dev/null 2>&1; then
-        exit 0
-      fi
-      if docker logs $CONTAINER_NAME 2>&1 | grep -qiE \"\$ERROR_PAT\"; then
-        exit 1
-      fi
+    for i in \$(seq 1 40); do
+      STATUS=\$(docker inspect -f '{{.State.Status}}' '$CONTAINER_NAME' 2>/dev/null || echo 'unknown')
+      [ \"\$STATUS\" = 'exited' ] && exit 1
+      docker exec '$CONTAINER_NAME' ip link show ppp0 >/dev/null 2>&1 && exit 0
+      docker logs '$CONTAINER_NAME' 2>&1 | grep -qiE \"\$ERROR_PAT\" && exit 1
       sleep 1
     done
     exit 1
-  " && VPN_CONNECTED=true || VPN_CONNECTED=false
-
-  # --- Handle connection failure ---
-  if [ "$VPN_CONNECTED" != true ]; then
-    LOGS=$(docker logs --tail 50 "$CONTAINER_NAME" 2>&1 || true)
-    VPN_ERROR=$(echo "$LOGS" | grep -iE "$VPN_ERROR_PATTERNS" | tail -n 3 || true)
-
-    if [ -z "$VPN_ERROR" ]; then
-      VPN_ERROR=$(echo "$LOGS" | grep -iE "ERROR:|error:|fatal" | tail -n 3 || true)
-    fi
-    if [ -z "$VPN_ERROR" ]; then
-      VPN_ERROR="Connection timed out or failed without a specific error."
-    fi
-
+  "; then
+    step_ok "VPN connected"
+  else
+    step_fail "VPN connection failed"
     echo ""
-    gum style \
-      --foreground 9 --border-foreground 9 --border double \
-      --align center --width 56 --margin "1 2" --padding "1 2" \
-      "FAILURE" "VPN connection failed"
-    echo ""
-    gum style --foreground 9 --bold "Error details:"
-    echo "$VPN_ERROR" | while IFS= read -r line; do
-      gum style --foreground 9 "  $line"
+    extract_vpn_error "$CONTAINER_NAME" | while IFS= read -r line; do
+      step_info "$line"
     done
     echo ""
-    gum style --foreground 8 "Full logs: docker compose logs"
+    step_info "Full logs: docker compose logs"
     echo ""
-    gum confirm "Press Enter to exit..." --default=true --affirmative="OK" --negative="" || true
+    gum confirm --default=true --affirmative="OK" --negative="" "Press Enter to exit..." || true
     exit 1
   fi
 
-  # --- Enable split tunneling ---
-  echo ""
+  # ---- Step 3: Enable split tunneling ----
 
   if has_tun2socks && [ -n "${VPN_ROUTES:-}" ]; then
-    # ---- Network-level split tunneling (all protocols) ----
-    if start_tunnel; then
-      gum style \
-        --foreground 10 --border-foreground 10 --border double \
-        --align center --width 56 --margin "1 2" --padding "1 2" \
-        "SUCCESS" "" \
-        "VPN connected — all protocols routed"
-      echo ""
-      gum style --foreground 10 --bold "What works now:"
-      gum style --foreground 7 "  SSH, Git, HTTP, HTTPS and any TCP/UDP traffic"
-      gum style --foreground 7 "  to the configured VPN routes."
-      echo ""
-      gum style --foreground 10 --bold "Routed networks:"
-      IFS=',' read -ra _routes <<< "$VPN_ROUTES"
-      for r in "${_routes[@]}"; do
-        r=$(echo "$r" | xargs)
-        [ -n "$r" ] && gum style --foreground 7 "  $r"
-      done
-      if [ -n "${VPN_DOMAINS:-}" ]; then
-        echo ""
-        gum style --foreground 10 --bold "Split DNS domains:"
-        IFS=',' read -ra _domains <<< "$VPN_DOMAINS"
-        for d in "${_domains[@]}"; do
-          d=$(echo "$d" | xargs)
-          [ -n "$d" ] && gum style --foreground 7 "  $d"
-        done
-      fi
-      echo ""
-      gum style --foreground 8 "To disconnect:  ./split.sh stop"
-      gum style --foreground 8 "To view logs:   docker compose logs -f"
+    # ---- tun2socks mode (all protocols) ----
+    if tunnel_create_interface; then
+      step_ok "Tunnel interface ${TUNNEL_DEV}"
     else
-      # tun2socks failed — fall back to PAC
-      gum style --foreground 11 "tun2socks failed — falling back to browser-only PAC proxy."
-      PAC_OK=false
-      enable_pac_proxy && PAC_OK=true || true
-      gum style \
-        --foreground 11 --border-foreground 11 --border double \
-        --align center --width 56 --margin "1 2" --padding "1 2" \
-        "PARTIAL" "" \
-        "VPN connected — tun2socks failed"
-      echo ""
-      if [ "$PAC_OK" = true ]; then
-        gum style --foreground 11 "Browser traffic is routed via the PAC proxy."
-      else
-        gum style --foreground 11 "No PAC file found — no traffic is routed automatically."
-        gum style --foreground 11 "Copy the example PAC file to enable browser routing:"
-        gum style --foreground 7 "  mkdir -p ~/Proxy"
-        gum style --foreground 7 "  cp proxy.pac.example ~/Proxy/packsolutions.pac"
-        gum style --foreground 7 "  # Edit the file to match your internal domains, then restart."
-      fi
-      echo ""
-      gum style --foreground 7 "For SSH, Git, or any CLI tool, set the SOCKS proxy manually:"
-      echo ""
-      gum style --foreground 7 "  ALL_PROXY=socks5h://127.0.0.1:1080 ssh user@host"
-      gum style --foreground 7 "  ALL_PROXY=socks5h://127.0.0.1:1080 git clone ..."
-      echo ""
-      gum style --foreground 8 "To disconnect:  ./split.sh stop"
+      step_fail "Tunnel setup failed"
+      show_fallback
+      exit 0
     fi
+
+    tunnel_add_routes
+    [ -n "$TUNNEL_ROUTES_ADDED" ] && step_ok "Routes  ${TUNNEL_ROUTES_ADDED}"
+
+    tunnel_configure_dns
+    [ -n "$TUNNEL_DOMAINS_ADDED" ] && step_ok "DNS     ${TUNNEL_DOMAINS_ADDED}"
+
+    echo ""
+    banner 10 "Connected" "All traffic to VPN networks is routed"
+    echo ""
+    summary_line "Proxy"  "127.0.0.1:1080"
+    summary_line "Routes" "${TUNNEL_ROUTES_ADDED}"
+    [ -n "$TUNNEL_DOMAINS_ADDED" ] && summary_line "DNS" "${TUNNEL_DOMAINS_ADDED}"
+    echo ""
+    gum style --foreground 8 "  Stop with:  ./split.sh stop"
+    gum style --foreground 8 "  Logs:       docker compose logs -f"
+
   else
-    # ---- PAC fallback (browser-only) ----
-    PAC_OK=false
-    enable_pac_proxy && PAC_OK=true || true
-
-    if [ "$PAC_OK" = true ]; then
-      gum style \
-        --foreground 10 --border-foreground 10 --border double \
-        --align center --width 56 --margin "1 2" --padding "1 2" \
-        "SUCCESS" "" \
-        "VPN connected — browser proxy active"
-      echo ""
-      gum style --foreground 10 "Browser traffic matching your PAC rules is routed through the VPN."
-      gum style --foreground 8 "PAC file: ${PAC_FILE}"
-    else
-      gum style \
-        --foreground 11 --border-foreground 11 --border double \
-        --align center --width 56 --margin "1 2" --padding "1 2" \
-        "SUCCESS" "" \
-        "VPN connected — SOCKS proxy available on :1080"
-      echo ""
-      gum style --foreground 11 "No PAC file found — no traffic is routed automatically."
-      gum style --foreground 11 "To enable browser routing, create a PAC file:"
-      gum style --foreground 7 "  mkdir -p ~/Proxy"
-      gum style --foreground 7 "  cp proxy.pac.example ~/Proxy/packsolutions.pac"
-      gum style --foreground 7 "  # Edit the file to match your internal domains, then restart."
-    fi
-    echo ""
-    gum style --foreground 7 "For SSH, Git, or any CLI tool, set the SOCKS proxy manually:"
-    echo ""
-    gum style --foreground 7 "  ALL_PROXY=socks5h://127.0.0.1:1080 ssh user@host"
-    gum style --foreground 7 "  ALL_PROXY=socks5h://127.0.0.1:1080 git clone ..."
-    echo ""
-
-    if ! has_tun2socks || [ -z "${VPN_ROUTES:-}" ]; then
-      gum style --foreground 11 --bold "Want full split tunneling (SSH, Git, etc.)?"
-      echo ""
-      if ! has_tun2socks; then
-        gum style --foreground 11 "  1. Install tun2socks:"
-        gum style --foreground 7 "     go install github.com/xjasonlyu/tun2socks/v2@latest"
-        echo ""
-      fi
-      gum style --foreground 11 "  2. Set these variables in .env:"
-      echo ""
-      gum style --foreground 7 "     # IP ranges to route through the VPN (ask your admin)"
-      gum style --foreground 7 "     VPN_ROUTES=10.0.0.0/8"
-      gum style --foreground 7 "     # DNS server inside the VPN"
-      gum style --foreground 7 "     VPN_DNS=10.0.0.1"
-      gum style --foreground 7 "     # Internal domains to resolve via VPN DNS"
-      gum style --foreground 7 "     VPN_DOMAINS=packsolutions.local"
-      echo ""
-      gum style --foreground 11 "  Then restart:  ./split.sh stop && ./split.sh start"
-      echo ""
-    fi
-
-    gum style --foreground 8 "To disconnect:  ./split.sh stop"
-    gum style --foreground 8 "To view logs:   docker compose logs -f"
+    # ---- PAC / manual SOCKS fallback ----
+    show_fallback
   fi
 
   exit 0
 }
 
-# --- Dispatch ---
-CMD="${1:-}"
+# Shown when tun2socks is not available or failed
+show_fallback() {
+  local pac_ok=false
+  enable_pac_proxy && pac_ok=true || true
 
-case "$CMD" in
+  [ "$pac_ok" = true ] && step_ok "Browser proxy enabled (PAC)"
+
+  echo ""
+  if [ "$pac_ok" = true ]; then
+    banner 10 "Connected" "Browser traffic routed via PAC proxy"
+  else
+    banner 11 "Connected" "SOCKS proxy available on :1080"
+  fi
+
+  echo ""
+  summary_line "Proxy" "127.0.0.1:1080"
+  echo ""
+  gum style --foreground 7 "  For CLI tools, set the proxy manually:"
+  gum style --foreground 8 "  ALL_PROXY=socks5h://127.0.0.1:1080 ssh user@host"
+  gum style --foreground 8 "  ALL_PROXY=socks5h://127.0.0.1:1080 git clone ..."
+
+  if ! has_tun2socks || [ -z "${VPN_ROUTES:-}" ]; then
+    echo ""
+    gum style --foreground 11 --bold "  Want full split tunneling?"
+    if ! has_tun2socks; then
+      gum style --foreground 8 "  Install:  go install github.com/xjasonlyu/tun2socks/v2@latest"
+    fi
+    if [ -z "${VPN_ROUTES:-}" ]; then
+      gum style --foreground 8 "  Configure VPN_ROUTES, VPN_DNS, VPN_DOMAINS in .env"
+    fi
+  fi
+
+  echo ""
+  gum style --foreground 8 "  Stop with:  ./split.sh stop"
+  gum style --foreground 8 "  Logs:       docker compose logs -f"
+}
+
+# --- Dispatch ---
+case "${1:-}" in
   start) cmd_start ;;
   stop)  cmd_stop ;;
   *)     usage ;;
