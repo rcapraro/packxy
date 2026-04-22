@@ -1,0 +1,30 @@
+// Packxy — PAC (Proxy Auto-Configuration) file
+//
+// This file tells your browser which traffic to route through the VPN
+// SOCKS proxy and which to send directly.
+//
+// Setup:
+//   mkdir -p ~/Proxy
+//   cp proxy.pac.example ~/Proxy/packsolutions.pac
+//   Edit the domain rules below to match your internal domains.
+//
+// The split.sh script automatically configures macOS to use this file
+// when tun2socks is not available.
+
+function FindProxyForURL(url, host) {
+
+    // --- Internal domains routed through the VPN SOCKS proxy ---
+    // Add your own domains below. Each rule matches the domain and
+    // all its subdomains (e.g. "app.internal.example.com").
+
+    if (
+        dnsDomainIs(host, "internal.example.com") ||
+        dnsDomainIs(host, "corp.example.com") ||
+        dnsDomainIs(host, "git.example.com")
+    ) {
+        return "SOCKS5 127.0.0.1:1080; DIRECT";
+    }
+
+    // --- Everything else goes direct (no proxy) ---
+    return "DIRECT";
+}

@@ -7,7 +7,7 @@ services:
     devices:
       - /dev/ppp:/dev/ppp
     ports:
-      - "1080:1080"
+      - "127.0.0.1:1080:1080"
     environment:
       FORTI_HOST: ${FORTI_HOST}
       FORTI_PORT: ${FORTI_PORT:-443}
@@ -16,4 +16,6 @@ services:
       FORTI_TRUSTED_CERT: ${FORTI_TRUSTED_CERT:-}
       FORTI_REALM: ${FORTI_REALM:-}
       FORTI_OTP: ${FORTI_OTP:-}
-    restart: unless-stopped
+      FORTI_NO_FTM_PUSH: ${FORTI_NO_FTM_PUSH:-}
+      FORTI_OTP_PROMPT: ${FORTI_OTP_PROMPT:-}
+    restart: "no"
