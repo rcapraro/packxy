@@ -64,6 +64,7 @@ start_vpn() {
     for i in $(seq 1 60); do
         PPP0_IP=$(ip -4 addr show ppp0 2>/dev/null | awk '/inet / {split($2, a, "/"); print a[1]}')
         if [ -n "${PPP0_IP}" ]; then
+            ip link set dev ppp0 mtu 1300 2>/dev/null || true
             return 0
         fi
         if ! kill -0 "${VPN_PID}" 2>/dev/null; then

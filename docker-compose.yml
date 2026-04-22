@@ -19,6 +19,7 @@ services:
       FORTI_NO_FTM_PUSH: ${FORTI_NO_FTM_PUSH:-}
       FORTI_OTP_PROMPT: ${FORTI_OTP_PROMPT:-}
     restart: "no"
-    # The container handles reconnection internally (up to 5 retries with 30s delay).
-    # It exits immediately on auth failure (no retry) to avoid account lockout.
-    # Use "unless-stopped" only if you want Docker to restart after max retries exhausted.
+    sysctls:
+      - net.ipv4.tcp_fin_timeout=30
+      - net.ipv4.tcp_tw_reuse=1
+      - net.ipv4.tcp_slow_start_after_idle=0

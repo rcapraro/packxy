@@ -18,7 +18,7 @@ COPY danted.conf /etc/danted.conf
 
 RUN chmod +x /entrypoint.sh
 
-HEALTHCHECK --interval=10s --timeout=5s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
   CMD ip link show ppp0 >/dev/null 2>&1 && pgrep danted >/dev/null
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
