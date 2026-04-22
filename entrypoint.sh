@@ -60,12 +60,12 @@ start_vpn() {
     openfortivpn -c "$CONFIG" $EXTRA_ARGS &
     VPN_PID=$!
 
+    # Wait for ppp0 to get an IP address
     PPP0_IP=""
     for i in $(seq 1 60); do
         PPP0_IP=$(ip -4 addr show ppp0 2>/dev/null | awk '/inet / {split($2, a, "/"); print a[1]}')
         if [ -n "${PPP0_IP}" ]; then
-            ip link set dev ppp0 mtu 1300 2>/dev/null || true
-            return 0
+            break
         fi
         if ! kill -0 "${VPN_PID}" 2>/dev/null; then
             echo "VPN process terminated unexpectedly." >&2
@@ -74,10 +74,21 @@ start_vpn() {
         sleep 1
     done
 
-    echo "VPN did not create ppp0 or no IP assigned." >&2
-    kill "${VPN_PID}" 2>/dev/null || true
-    wait "${VPN_PID}" 2>/dev/null || true
-    return 1
+    if [ -z "${PPP0_IP}" ]; then
+        echo "VPN did not create ppp0 or no IP assigned." >&2
+        kill "${VPN_PID}" 2>/dev/null || true
+        wait "${VPN_PID}" 2>/dev/null || true
+        return 1
+    fi
+
+    # Wait for openfortivpn to finish setting up routes and DNS
+    for i in $(seq 1 15); do
+        ip route show dev ppp0 2>/dev/null | grep -q . && break
+        sleep 1
+    done
+
+    ip link set dev ppp0 mtu 1300 2>/dev/null || true
+    return 0
 }
 
 # --- Merge DNS: keep VPN nameservers first, append Docker DNS as fallback ---
