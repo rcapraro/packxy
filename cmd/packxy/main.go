@@ -26,20 +26,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
 	"github.com/rcapraro/packxy/internal/dockerd"
 	"github.com/rcapraro/packxy/internal/envcfg"
 	"github.com/rcapraro/packxy/internal/macnet"
 	"github.com/rcapraro/packxy/internal/state"
 	"github.com/rcapraro/packxy/internal/tunnel"
 	"github.com/rcapraro/packxy/internal/ui"
-)
-
-var (
-	colOK   = lipgloss.Color("10")
-	colFail = lipgloss.Color("9")
-	colWarn = lipgloss.Color("11")
-	colMute = lipgloss.Color("240")
 )
 
 func main() {
@@ -64,10 +56,17 @@ func main() {
 }
 
 func usage() {
-	fmt.Println("Usage: packxy start | packxy stop")
+	ui.Header()
+	ui.Section("Usage")
+	ui.Line("packxy <command>")
+
+	ui.Section("Commands")
+	ui.KeyValue("start", "Connect to VPN and enable split tunneling")
+	ui.KeyValue("stop", "Disconnect VPN and remove split tunneling")
+
+	ui.Section("Options")
+	ui.KeyValue("-h, --help", "Show this message")
 	fmt.Println()
-	fmt.Println("  start   Connect to VPN and enable split tunneling")
-	fmt.Println("  stop    Disconnect VPN and remove split tunneling")
 }
 
 // =====================================================================
@@ -101,6 +100,7 @@ func runStart() int {
 
 	ui.Page()
 	ui.Header()
+	ui.Section("Credentials")
 
 	if err := promptCredentials(cfg); err != nil {
 		ui.PrintErr("input cancelled: %v", err)
@@ -110,26 +110,29 @@ func runStart() int {
 
 	ui.Page()
 	ui.Header()
+	ui.Section("Pipeline")
 
-	if err := ui.Spin("Starting container...", func() error {
+	dur, err := ui.Spin("Starting container...", func() error {
 		return dockerd.ComposeUp(workdir)
-	}); err != nil {
+	})
+	if err != nil {
 		ui.StepFail("Container failed to start")
 		fmt.Println()
 		ui.MutedHint("     Run docker compose up -d to see the error.")
 		return 1
 	}
-	ui.StepOK("Container started")
+	ui.StepOK("Container started", dur)
 
 	container := dockerd.ResolveContainerName(workdir)
 
-	if err := ui.Spin("Connecting to VPN...", func() error {
+	dur, err = ui.Spin("Connecting to VPN...", func() error {
 		return dockerd.WaitForVPN(container)
-	}); err != nil {
+	})
+	if err != nil {
 		ui.Page()
 		ui.Header()
-		ui.Banner(colFail, "✖ Connection Failed", "")
-		ui.Tagline(colFail, "Can't Pack today... check credentials and try again 🔧")
+		ui.Banner(ui.ColFail, "✖ Connection Failed", "")
+		ui.Tagline(ui.ColFail, "Can't Pack today... check credentials and try again 🔧")
 		ui.ErrorCard(dockerd.ExtractError(container))
 		fmt.Println()
 		ui.MutedHint("     📋  Full logs: docker compose logs")
@@ -137,7 +140,7 @@ func runStart() int {
 		ui.PressEnter("Press Enter to exit...")
 		return 1
 	}
-	ui.StepOK("VPN connected")
+	ui.StepOK("VPN connected", dur)
 
 	dev, err := startEmbeddedTunnel("socks5://127.0.0.1:1080")
 	if err != nil {
@@ -158,8 +161,9 @@ func runStart() int {
 
 	ui.Page()
 	ui.Header()
-	ui.Banner(colOK, "🔒 Connected", "All traffic to VPN networks is routed")
-	ui.Tagline(colOK, "All Packed up and ready to tunnel! 🚀")
+	ui.Banner(ui.ColOK, "🔒 Connected", "All traffic to VPN networks is routed")
+	ui.Tagline(ui.ColOK, "All Packed up and ready to tunnel! 🚀")
+	ui.Section("Connection")
 
 	card := []ui.CardLine{
 		{Icon: "🌐", Label: "Proxy", Value: "127.0.0.1:1080"},
@@ -168,7 +172,7 @@ func runStart() int {
 	if domains != "" {
 		card = append(card, ui.CardLine{Icon: "🔍", Label: "DNS", Value: domains})
 	}
-	ui.SummaryCard(colOK, card)
+	ui.SummaryCard(ui.ColOK, card)
 	ui.Footer()
 	return 0
 }
@@ -357,22 +361,24 @@ func runStop() int {
 
 	ui.Page()
 	ui.Header()
+	ui.Section("Teardown")
 
 	stopTunnel()
 	ui.StepOK("Tunnel removed")
 
-	if err := ui.Spin("Stopping container...", func() error {
+	dur, err := ui.Spin("Stopping container...", func() error {
 		return dockerd.ComposeDown(workdir)
-	}); err != nil {
+	})
+	if err != nil {
 		ui.StepWarn("Container down failed: " + err.Error())
 	} else {
-		ui.StepOK("Container stopped")
+		ui.StepOK("Container stopped", dur)
 	}
 
 	ui.Page()
 	ui.Header()
-	ui.Banner(colOK, "🔓 Disconnected", "")
-	ui.Tagline(colMute, "Packed up. See you next time! 👋")
+	ui.Banner(ui.ColOK, "🔓 Disconnected", "")
+	ui.Tagline(ui.ColMuted, "Packed up. See you next time! 👋")
 	fmt.Println()
 	return 0
 }
