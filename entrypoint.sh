@@ -48,6 +48,18 @@ if [ "${FORTI_NO_FTM_PUSH:-}" = "1" ]; then
     EXTRA_ARGS="--no-ftm-push"
 fi
 
+# Keep the tunnel alive against NAT/firewall idle timeouts and trigger a
+# fast pppd exit when the link goes silent, so the monitor loop can reconnect.
+write_ppp_options() {
+    mkdir -p /etc/ppp
+    cat > /etc/ppp/options <<EOF
+lcp-echo-interval ${PPP_LCP_ECHO_INTERVAL:-30}
+lcp-echo-failure ${PPP_LCP_ECHO_FAILURE:-4}
+EOF
+}
+
+write_ppp_options
+
 # --- Save original DNS so we can merge later ---
 cp /etc/resolv.conf /etc/resolv.conf.orig
 
