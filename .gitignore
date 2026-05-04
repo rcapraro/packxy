@@ -1,3 +1,5 @@
 .env
 .claude/
 .junie/
+/packxy
+/dist/

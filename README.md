@@ -16,25 +16,12 @@ macOS split tunneling for FortiGate VPN. Connects via `openfortivpn` inside a Do
        to the tunnel
 ```
 
-**Two routing modes** (selected automatically):
-
-| Mode | Protocols | Requires |
-|---|---|---|
-| **tun2socks** (recommended) | All — SSH, Git, HTTP, HTTPS, etc. | `tun2socks` installed + `VPN_ROUTES` in `.env` |
-| **PAC proxy** (fallback) | Browser only — HTTP / HTTPS | A PAC file on disk |
+Packxy ships as a single self-contained Go binary that embeds [tun2socks](https://github.com/xjasonlyu/tun2socks) (gVisor netstack) — no separate binaries to install. Routing is network-level via `tun2socks`, so all protocols (SSH, Git, HTTP, HTTPS, etc.) work transparently.
 
 ## Prerequisites
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) (with Docker Compose)
-- [gum](https://github.com/charmbracelet/gum) — interactive terminal prompts
-  ```bash
-  brew install gum
-  ```
-- [tun2socks](https://github.com/xjasonlyu/tun2socks) — for network-level split tunneling (recommended)
-  ```bash
-  go install github.com/xjasonlyu/tun2socks/v2@latest
-  ```
-  > Requires Go 1.21+. The binary is installed to `$GOPATH/bin` (or `~/go/bin` by default) — make sure it's in your `PATH`.
+- Go 1.22+ to build the binary (`make build`)
 - FortiGate VPN credentials (host, username, password, OTP)
 
 ## Quick start
@@ -87,21 +74,24 @@ See [Configuration reference](#configuration-reference) for all options.
 ### 2. Build
 
 ```bash
-docker compose build
+make build              # builds ./packxy for the host architecture
+docker compose build    # builds the openfortivpn + danted container image
 ```
+
+For a fat (universal) macOS binary, run `make universal` — output goes to `dist/packxy`.
 
 ### 3. Connect
 
 ```bash
-./split.sh start
+./packxy start
 ```
 
-The script will show your saved values and prompt for confirmation. You will always be asked for a fresh **OTP code**.
+Packxy will show your saved values and prompt for confirmation. You will always be asked for a fresh **OTP code**. The first run prompts for `sudo` (needed to create the `utun` device, add routes, and write `/etc/resolver/*`).
 
 ### 4. Disconnect
 
 ```bash
-./split.sh stop
+./packxy stop
 ```
 
 This tears down the VPN container, removes tun2socks routes, and restores your network settings.
@@ -124,44 +114,21 @@ All settings go in the `.env` file. Values are pre-filled in the interactive pro
 | `FORTI_NO_FTM_PUSH` | | Set to `1` to disable FortiToken push and force manual OTP entry |
 | `FORTI_OTP_PROMPT` | | Custom OTP prompt string for prompt detection |
 
-### Split tunneling (tun2socks)
+### Split tunneling
 
-These three variables enable network-level routing so **all** protocols (SSH, Git, HTTP, HTTPS, etc.) work through the VPN — not just browser traffic. All three must be set for split tunneling to activate.
+`VPN_ROUTES` is **required** — without it Packxy refuses to start. `VPN_DNS` and `VPN_DOMAINS` are optional and enable split DNS for internal hostnames.
 
-| Variable | What it does | Example |
-|---|---|---|
-| `VPN_ROUTES` | IP ranges to send through the VPN. Traffic to these CIDRs goes through the tunnel; everything else stays direct. | `10.0.0.0/8` |
-| `VPN_DNS` | DNS server inside the VPN, used to resolve internal hostnames. | `10.0.0.1` |
-| `VPN_DOMAINS` | Domain suffixes to resolve via `VPN_DNS`. Only these domains use the VPN DNS; all other lookups use your normal DNS. | `packsolutions.local` |
+| Variable | Required | What it does | Example |
+|---|---|---|---|
+| `VPN_ROUTES` | yes | IP ranges to send through the VPN. Traffic to these CIDRs goes through the tunnel; everything else stays direct. | `10.0.0.0/8` |
+| `VPN_DNS` | | DNS server inside the VPN, used to resolve internal hostnames. | `10.0.0.1` |
+| `VPN_DOMAINS` | | Domain suffixes to resolve via `VPN_DNS`. Only these domains use the VPN DNS; all other lookups use your normal DNS. | `packsolutions.local` |
 
 Multiple values are comma-separated: `VPN_ROUTES=10.0.0.0/8,172.16.0.0/12`
 
-### PAC proxy (browser-only fallback)
-
-If tun2socks is not installed or `VPN_ROUTES` is not set, the script falls back to a PAC (Proxy Auto-Configuration) file. A PAC file tells your **browser** which domains to route through the SOCKS proxy and which to access directly.
-
-> **Important:** The PAC file only affects browser traffic (HTTP/HTTPS). CLI tools like `ssh`, `git`, or `curl` are **not** affected — you need to set `ALL_PROXY=socks5h://127.0.0.1:1080` manually for those (or use the tun2socks mode instead).
-
-**When do you need this?** Only if you are not using tun2socks. If tun2socks + `VPN_ROUTES` are configured, the PAC file is not used.
-
-**Setup:**
-
-```bash
-mkdir -p ~/Proxy
-cp proxy.pac.example ~/Proxy/packsolutions.pac
-```
-
-Then edit `~/Proxy/packsolutions.pac` and replace the example domains with your actual internal domains. See `proxy.pac.example` in this repo for the format.
-
-The script automatically sets this file as the macOS system proxy on `./split.sh start` and removes it on `./split.sh stop`.
-
-| Variable | Description | Default |
-|---|---|---|
-| `PAC_FILE` | Path to your PAC file | `~/Proxy/packsolutions.pac` |
-
 ## Testing the connection
 
-After a successful `./split.sh start`, verify the tunnel is working:
+After a successful `./packxy start`, verify the tunnel is working:
 
 ```bash
 # Test SOCKS proxy directly (bypasses tun2socks, goes straight through the proxy)
@@ -181,11 +148,13 @@ curl http://internal-app.example.com
 
 | Action | Command |
 |---|---|
-| Start VPN | `./split.sh start` |
-| Stop VPN | `./split.sh stop` |
+| Start VPN | `./packxy start` |
+| Stop VPN | `./packxy stop` |
+| Rebuild binary | `make build` |
 | Rebuild image | `docker compose build` |
 | View live logs | `docker compose logs -f` |
 | Container status | `docker compose ps` |
+| Inspect tunnel logs | `cat /tmp/forti-socks/tunnel.log` |
 
 ## Troubleshooting
 
@@ -201,31 +170,37 @@ curl http://internal-app.example.com
 - The container needs `/dev/ppp` — make sure Docker Desktop has access to it
 - The VPN may have authenticated but the PPP negotiation failed — check logs
 
-### tun2socks not working
+### Tunnel not working
 
-- Verify it's installed: `ls ~/go/bin/tun2socks` (or `which tun2socks` if it's in your PATH)
-- The script checks `~/go/bin` and `/usr/local/bin` automatically
-- The script needs `sudo` to create the tunnel interface — you'll be prompted for your password
+- Packxy needs `sudo` to create the tunnel interface — you'll be prompted for your password
 - Check that `VPN_ROUTES`, `VPN_DNS`, and `VPN_DOMAINS` are all set in `.env`
+- Inspect the engine output: `cat /tmp/forti-socks/tunnel.log`
+- Check the chosen utun device: `cat /tmp/forti-socks/tun_dev`
 
 ### Connection drops / container exits
 
 - If the VPN drops after a successful connection, the container automatically reconnects (up to 5 attempts, 30 seconds apart)
 - If the initial connection fails (wrong password, expired OTP), the container exits immediately — no retry, to avoid account lockout
-- After max retries are exhausted, run `./split.sh start` again with a fresh OTP
+- After max retries are exhausted, run `./packxy start` again with a fresh OTP
 
 ## Project files
 
 | File | Purpose |
 |---|---|
-| `split.sh` | Main CLI — start/stop VPN + split tunneling |
+| `cmd/packxy/main.go` | CLI entry — `start` / `stop` / `_tunnel` subcommands |
+| `internal/tunnel/` | Embedded tun2socks engine (gVisor netstack) |
+| `internal/dockerd/` | Docker Compose driver and VPN log scraping |
+| `internal/macnet/` | macOS networking helpers (routes, DNS, sudo) |
+| `internal/ui/` | Terminal UI (huh prompts + lipgloss styling) |
+| `internal/envcfg/` | `.env` loading |
+| `internal/state/` | `/tmp/forti-socks` state (PID, device, routes, domains) |
+| `Makefile` | `build`, `build-arm64`, `build-amd64`, `universal`, `clean` |
 | `docker-compose.yml` | Docker Compose service definition |
 | `Dockerfile` | Container image (Debian + openfortivpn + danted) |
 | `entrypoint.sh` | Container entrypoint — connects VPN, starts SOCKS proxy |
 | `danted.conf` | Dante SOCKS5 proxy configuration |
 | `.env` | Your VPN credentials and routing config (git-ignored) |
 | `.env.sample` | Template for `.env` |
-| `proxy.pac.example` | Example PAC file for the browser-only fallback mode |
 
 ## Security notes
 
@@ -236,6 +211,6 @@ curl http://internal-app.example.com
 ## References
 
 - [openfortivpn](https://github.com/adrienverge/openfortivpn)
-- [tun2socks](https://github.com/xjasonlyu/tun2socks)
-- [gum](https://github.com/charmbracelet/gum)
+- [tun2socks](https://github.com/xjasonlyu/tun2socks) (embedded as a Go library via the `engine` package)
+- [Charm huh](https://github.com/charmbracelet/huh) and [lipgloss](https://github.com/charmbracelet/lipgloss) — terminal UI
 - [Dante SOCKS server](https://www.inet.no/dante/)

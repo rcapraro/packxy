@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Publish (macOS universal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Resolve version
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Build darwin/arm64
+        run: |
+          mkdir -p build
+          GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w" \
+            -o build/packxy-arm64 ./cmd/packxy
+
+      - name: Build darwin/amd64
+        run: |
+          GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="-s -w" \
+            -o build/packxy-amd64 ./cmd/packxy
+
+      - name: Create universal binary
+        run: |
+          lipo -create -output build/packxy-universal \
+            build/packxy-arm64 build/packxy-amd64
+          file build/packxy-universal
+
+      - name: Package archives
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          mkdir -p dist
+          for arch in arm64 amd64 universal; do
+            stage="build/stage-${arch}"
+            mkdir -p "${stage}"
+            cp "build/packxy-${arch}" "${stage}/packxy"
+            cp README.md "${stage}/" 2>/dev/null || true
+            tar -czf "dist/packxy-${V}-darwin-${arch}.tar.gz" -C "${stage}" .
+          done
+
+      - name: Generate checksums
+        working-directory: dist
+        run: shasum -a 256 *.tar.gz > checksums.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/checksums.txt
+          generate_release_notes: true
+          fail_on_unmatched_files: true
