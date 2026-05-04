@@ -114,6 +114,17 @@ All settings go in the `.env` file. Values are pre-filled in the interactive pro
 | `FORTI_NO_FTM_PUSH` | | Set to `1` to disable FortiToken push and force manual OTP entry |
 | `FORTI_OTP_PROMPT` | | Custom OTP prompt string for prompt detection |
 
+### PPP keepalive
+
+`pppd` LCP echo requests keep the tunnel alive against NAT/firewall idle timeouts and let `pppd` exit quickly when the link goes silent, so the container's monitor loop can reconnect.
+
+| Variable | Required | Description | Default |
+|---|---|---|---|
+| `PPP_LCP_ECHO_INTERVAL` | | Seconds between LCP echo requests | `30` |
+| `PPP_LCP_ECHO_FAILURE` | | Missed echoes before `pppd` declares the link dead | `4` |
+
+Defaults give a ~2-minute dead-link detection window.
+
 ### Split tunneling
 
 `VPN_ROUTES` is **required** — without it Packxy refuses to start. `VPN_DNS` and `VPN_DOMAINS` are optional and enable split DNS for internal hostnames.
