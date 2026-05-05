@@ -6,8 +6,14 @@ set -eu
 : "${FORTI_PASS:?missing FORTI_PASS}"
 
 CONFIG=/etc/openfortivpn/config
+VPN_LOG=/tmp/openfortivpn.log
 MAX_RECONNECTS=5
 RECONNECT_DELAY=30
+
+# Errors that mean retrying with the same credentials cannot succeed
+# (e.g. expired OTP after the laptop slept). When seen, exit fast instead
+# of burning reconnect attempts and risking a FortiGate account lockout.
+AUTH_ERROR_RE='Could not authenticate to gateway|check the password, client certificate|Authentication failed|Invalid (password|OTP)|OTP required'
 
 # --- Build openfortivpn config ---
 # set-routes = 1 : import VPN routes so danted can reach internal hosts through ppp0
@@ -69,8 +75,14 @@ cp /etc/resolv.conf /etc/resolv.conf.orig
 start_vpn() {
     build_config
 
-    openfortivpn -c "$CONFIG" $EXTRA_ARGS &
+    : > "$VPN_LOG"
+    openfortivpn -c "$CONFIG" $EXTRA_ARGS >> "$VPN_LOG" 2>&1 &
     VPN_PID=$!
+
+    # Mirror openfortivpn output to stdout so it shows up in `docker logs`,
+    # while the file copy stays available for grep-based error detection.
+    tail -n +1 -f "$VPN_LOG" &
+    TAIL_PID=$!
 
     # Wait for ppp0 to get an IP address
     PPP0_IP=""
@@ -81,6 +93,9 @@ start_vpn() {
         fi
         if ! kill -0 "${VPN_PID}" 2>/dev/null; then
             echo "VPN process terminated unexpectedly." >&2
+            wait "${VPN_PID}" 2>/dev/null || true
+            sleep 1
+            stop_tail
             return 1
         fi
         sleep 1
@@ -90,6 +105,7 @@ start_vpn() {
         echo "VPN did not create ppp0 or no IP assigned." >&2
         kill "${VPN_PID}" 2>/dev/null || true
         wait "${VPN_PID}" 2>/dev/null || true
+        stop_tail
         return 1
     fi
 
@@ -133,13 +149,28 @@ stop_dante() {
     fi
 }
 
+stop_tail() {
+    if [ -n "${TAIL_PID:-}" ]; then
+        kill "${TAIL_PID}" 2>/dev/null || true
+        wait "${TAIL_PID}" 2>/dev/null || true
+        TAIL_PID=""
+    fi
+}
+
+# Returns 0 if the last openfortivpn run failed with an auth-class error.
+vpn_auth_failed() {
+    grep -Eq "${AUTH_ERROR_RE}" "$VPN_LOG" 2>/dev/null
+}
+
 # --- Cleanup on exit ---
 VPN_PID=""
 DANTE_PID=""
+TAIL_PID=""
 
 cleanup() {
     [ -n "${VPN_PID}" ]   && kill "${VPN_PID}"   2>/dev/null || true
     [ -n "${DANTE_PID}" ] && kill "${DANTE_PID}" 2>/dev/null || true
+    [ -n "${TAIL_PID}" ]  && kill "${TAIL_PID}"  2>/dev/null || true
     wait 2>/dev/null || true
 }
 trap cleanup INT TERM EXIT
@@ -172,6 +203,19 @@ while true; do
 
     # Check openfortivpn
     if ! kill -0 "${VPN_PID}" 2>/dev/null; then
+        # Wait briefly for the tail to flush openfortivpn's last lines.
+        wait "${VPN_PID}" 2>/dev/null || true
+        sleep 1
+        stop_tail
+
+        # Auth errors (notably: expired OTP after suspend) cannot be fixed
+        # by retrying the same credentials — exit fast for a clean restart.
+        if vpn_auth_failed; then
+            echo "VPN authentication failed — credentials/OTP no longer valid." >&2
+            echo "Exiting without retry to avoid lockout. Restart packxy for a fresh OTP." >&2
+            exit 2
+        fi
+
         reconnect_count=$((reconnect_count + 1))
 
         if [ "${reconnect_count}" -gt "${MAX_RECONNECTS}" ]; then
@@ -191,6 +235,11 @@ while true; do
             reconnect_count=0
         else
             echo "Reconnection failed." >&2
+            if vpn_auth_failed; then
+                echo "VPN authentication failed — credentials/OTP no longer valid." >&2
+                echo "Exiting without retry to avoid lockout. Restart packxy for a fresh OTP." >&2
+                exit 2
+            fi
         fi
     fi
 

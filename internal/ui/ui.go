@@ -17,7 +17,6 @@ import (
 	"github.com/charmbracelet/huh/spinner"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/list"
-	"github.com/charmbracelet/lipgloss/table"
 )
 
 const boxWidth = 56
@@ -52,7 +51,7 @@ func Page() {
 // Header prints the application banner.
 func Header() {
 	title := primary.Bold(true).Render("📦  P A C K X Y")
-	subtitle := muted.Render("Split tunneling for FortiGate VPN · macOS")
+	subtitle := muted.Render("Keep calm and Pack through the Proxy VPN")
 	body := title + "\n\n" + subtitle
 
 	box := lipgloss.NewStyle().
@@ -164,39 +163,38 @@ func formatDur(d time.Duration) string {
 // CardLine is one row in a SummaryCard.
 type CardLine struct{ Icon, Label, Value string }
 
-// SummaryCard renders a tidy three-column table (icon, label, value) inside a
+// SummaryCard renders a tidy three-column layout (icon, label, value) inside a
 // rounded border tinted with the given color.
 func SummaryCard(color lipgloss.TerminalColor, lines []CardLine) {
-	rows := make([][]string, 0, len(lines))
+	iconW, labelW := 0, 0
 	for _, l := range lines {
-		rows = append(rows, []string{l.Icon, l.Label, l.Value})
+		if w := lipgloss.Width(l.Icon); w > iconW {
+			iconW = w
+		}
+		if w := lipgloss.Width(l.Label); w > labelW {
+			labelW = w
+		}
 	}
 
-	iconCol := lipgloss.NewStyle().Padding(0, 1).Align(lipgloss.Center)
-	labelCol := lipgloss.NewStyle().Foreground(ColMuted).Bold(true).Padding(0, 1)
-	valueCol := lipgloss.NewStyle().Foreground(ColHint).Padding(0, 1)
+	iconCol := lipgloss.NewStyle().Width(iconW).Align(lipgloss.Center)
+	labelCol := lipgloss.NewStyle().Foreground(ColMuted).Bold(true).Width(labelW)
+	valueCol := lipgloss.NewStyle().Foreground(ColHint)
 
-	tbl := table.New().
+	rendered := make([]string, 0, len(lines))
+	for _, l := range lines {
+		row := iconCol.Render(l.Icon) + "  " + labelCol.Render(l.Label) + "  " + valueCol.Render(l.Value)
+		rendered = append(rendered, row)
+	}
+	body := strings.Join(rendered, "\n")
+
+	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderStyle(lipgloss.NewStyle().Foreground(color)).
-		BorderColumn(false).
-		BorderRow(false).
-		BorderHeader(false).
-		Width(boxWidth + 2).
-		Rows(rows...).
-		StyleFunc(func(_, col int) lipgloss.Style {
-			switch col {
-			case 0:
-				return iconCol
-			case 1:
-				return labelCol
-			default:
-				return valueCol
-			}
-		})
-
-	out := lipgloss.NewStyle().Margin(0, 2).Render(tbl.String())
-	fmt.Println(out)
+		BorderForeground(color).
+		Width(boxWidth).
+		Padding(0, 2).
+		Margin(0, 2).
+		Render(body)
+	fmt.Println(box)
 }
 
 // ErrorCard renders raw error output inside a red rounded box.

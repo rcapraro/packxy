@@ -2,13 +2,17 @@ package dockerd
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/rcapraro/packxy/internal/state"
 )
 
 const ContainerName = "forti-socks"
@@ -28,6 +32,43 @@ func ComposeUp(workdir string) error {
 		return fmt.Errorf("docker compose up failed: %v: %s", err, string(out))
 	}
 	return nil
+}
+
+// Wait blocks (until ctx is cancelled) on `docker wait` and returns the
+// container's exit code on termination. Returns context.Canceled or
+// context.DeadlineExceeded if the wait is interrupted.
+func Wait(ctx context.Context, container string) (int, error) {
+	cmd := exec.CommandContext(ctx, "docker", "wait", container)
+	out, err := cmd.Output()
+	if err != nil {
+		if ctx.Err() != nil {
+			return -1, ctx.Err()
+		}
+		return -1, fmt.Errorf("docker wait %s: %w", container, err)
+	}
+	code, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return -1, fmt.Errorf("parse exit code %q: %w", string(out), err)
+	}
+	return code, nil
+}
+
+// Classify maps a container exit code to a Reason for user-facing messages.
+//
+//   - 2 → ReasonAuthExpired (entrypoint.sh exits 2 on Could not authenticate /
+//     Invalid OTP, typically a token burned by macOS sleep)
+//   - 1 → ReasonNetworkDrop (entrypoint.sh exits 1 after exhausting its
+//     reconnect retries with a non-auth error)
+//   - other → ReasonUnknown
+func Classify(code int) state.Reason {
+	switch code {
+	case 2:
+		return state.ReasonAuthExpired
+	case 1:
+		return state.ReasonNetworkDrop
+	default:
+		return state.ReasonUnknown
+	}
 }
 
 // ComposeDown tears the container down.
@@ -83,6 +124,41 @@ func containerStatus(container string) string {
 		return "unknown"
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// Status returns the container's current state ("running", "exited",
+// "unknown", or "absent") and, when running, its ppp0 address (or empty if
+// ppp0 is not yet up).
+func Status(container string) (state string, ppp0IP string) {
+	cmd := exec.Command("docker", "inspect", "-f", "{{.State.Status}}", container)
+	out, err := cmd.Output()
+	if err != nil {
+		return "absent", ""
+	}
+	st := strings.TrimSpace(string(out))
+	if st == "" {
+		return "absent", ""
+	}
+	if st != "running" {
+		return st, ""
+	}
+	return st, pppIP(container)
+}
+
+func pppIP(container string) string {
+	cmd := exec.Command("docker", "exec", container, "ip", "-4", "-o", "addr", "show", "dev", "ppp0")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	// Sample line: "12: ppp0    inet 10.212.134.220 peer 10.212.134.1/32 ..."
+	fields := strings.Fields(string(out))
+	for i, f := range fields {
+		if f == "inet" && i+1 < len(fields) {
+			return strings.SplitN(fields[i+1], "/", 2)[0]
+		}
+	}
+	return ""
 }
 
 func hasPPP0(container string) bool {

@@ -4,11 +4,13 @@
 // :1080) and embeds tun2socks (xjasonlyu/tun2socks/v2/engine) to route traffic
 // for the configured CIDRs through the proxy at the network layer.
 //
-// Three subcommands:
+// Subcommands:
 //
 //	packxy start     — launch the VPN container, embedded tunnel, routes and DNS
 //	packxy stop      — tear everything down
 //	packxy _tunnel   — internal: runs the embedded engine as root (re-exec target)
+//	packxy _watcher  — internal: monitors the VPN container and prompts for a
+//	                   fresh OTP when it dies (e.g. after Mac sleep)
 package main
 
 import (
@@ -44,8 +46,12 @@ func main() {
 		os.Exit(runStart())
 	case "stop":
 		os.Exit(runStop())
+	case "status":
+		os.Exit(runStatus())
 	case "_tunnel":
 		os.Exit(runTunnel(os.Args[2:]))
+	case "_watcher":
+		os.Exit(runWatcher(os.Args[2:]))
 	case "-h", "--help", "help":
 		usage()
 		os.Exit(0)
@@ -63,6 +69,7 @@ func usage() {
 	ui.Section("Commands")
 	ui.KeyValue("start", "Connect to VPN and enable split tunneling")
 	ui.KeyValue("stop", "Disconnect VPN and remove split tunneling")
+	ui.KeyValue("status", "Show watcher, tunnel and VPN container state")
 
 	ui.Section("Options")
 	ui.KeyValue("-h, --help", "Show this message")
@@ -159,6 +166,12 @@ func runStart() int {
 		ui.StepOK("DNS     " + domains)
 	}
 
+	if err := spawnWatcher(workdir, container); err != nil {
+		ui.StepWarn("Watcher not started: " + err.Error())
+	} else {
+		ui.StepOK("Watcher armed (re-prompts OTP if VPN drops)")
+	}
+
 	ui.Page()
 	ui.Header()
 	ui.Banner(ui.ColOK, "🔒 Connected", "All traffic to VPN networks is routed")
@@ -239,6 +252,52 @@ func exportEnv(cfg *envcfg.Config) {
 	setenv("FORTI_REALM", cfg.Realm)
 	setenv("FORTI_NO_FTM_PUSH", cfg.NoFTMPush)
 	setenv("FORTI_OTP_PROMPT", cfg.OTPPrompt)
+}
+
+// spawnWatcher re-execs ourselves as `packxy _watcher` in a new session so the
+// daemon survives the parent's exit. Stdout and stderr are redirected to
+// state/watcher.log. The PID is recorded in state for `packxy stop`.
+func spawnWatcher(workdir, container string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if err := state.Ensure(); err != nil {
+		return err
+	}
+
+	logF, err := os.OpenFile(state.WatcherLogPath(), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		_ = logF.Close()
+		return err
+	}
+
+	cmd := exec.Command(exe, "_watcher", "-workdir", workdir, "-container", container)
+	cmd.Env = os.Environ()
+	cmd.Stdin = devNull
+	cmd.Stdout = logF
+	cmd.Stderr = logF
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		_ = logF.Close()
+		_ = devNull.Close()
+		return err
+	}
+	// Close our copies; the child keeps them.
+	_ = logF.Close()
+	_ = devNull.Close()
+
+	if err := state.WriteWatcherPID(cmd.Process.Pid); err != nil {
+		return err
+	}
+
+	// Reap the child eventually if it dies on its own (unlikely, but tidy).
+	go func() { _ = cmd.Wait() }()
+	return nil
 }
 
 // startEmbeddedTunnel re-execs ourselves under sudo to run the engine as root,
@@ -363,6 +422,10 @@ func runStop() int {
 	ui.Header()
 	ui.Section("Teardown")
 
+	if stopWatcher() {
+		ui.StepOK("Watcher stopped")
+	}
+
 	stopTunnel()
 	ui.StepOK("Tunnel removed")
 
@@ -383,6 +446,23 @@ func runStop() int {
 	return 0
 }
 
+// stopWatcher signals the watcher daemon (if any) to exit. Returns true if a
+// signal was sent successfully.
+func stopWatcher() bool {
+	pid, err := state.ReadWatcherPID()
+	if err != nil || pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		return false
+	}
+	return true
+}
+
 func stopTunnel() {
 	if pid, err := state.ReadPID(); err == nil && pid > 0 {
 		_ = macnet.SudoKill(pid)
@@ -393,6 +473,114 @@ func stopTunnel() {
 		}
 	}
 	_ = state.Clear()
+}
+
+// =====================================================================
+//  status
+// =====================================================================
+
+func runStatus() int {
+	workdir, err := projectDir()
+	if err != nil {
+		ui.PrintErr("could not locate project directory: %v", err)
+		return 1
+	}
+	container := dockerd.ResolveContainerName(workdir)
+
+	ui.Page()
+	ui.Header()
+	ui.Section("Status")
+
+	watcherPID, _ := state.ReadWatcherPID()
+	tunnelPID, _ := state.ReadPID()
+	device, _ := os.ReadFile(filepath.Join(state.Dir, "tun_dev"))
+	routes, _ := state.ReadRoutes()
+	domains, _ := state.ReadDomains()
+	containerState, ppp0IP := dockerd.Status(container)
+	lastDrop, hasDrop, _ := state.ReadLastDrop()
+
+	card := []ui.CardLine{
+		{Icon: statusIcon(watcherPID > 0), Label: "Watcher", Value: pidValue(watcherPID)},
+		{Icon: statusIcon(containerState == "running"), Label: "Container", Value: containerValue(containerState, ppp0IP)},
+		{Icon: statusIcon(tunnelPID > 0 && state.ProcessAlive(tunnelPID)), Label: "Tunnel", Value: tunnelValue(tunnelPID, string(device))},
+	}
+	if len(routes) > 0 {
+		card = append(card, ui.CardLine{Icon: "🔀", Label: "Routes", Value: strings.Join(routes, ", ")})
+	}
+	if len(domains) > 0 {
+		card = append(card, ui.CardLine{Icon: "🔍", Label: "DNS", Value: strings.Join(domains, ", ")})
+	}
+	if hasDrop {
+		card = append(card, ui.CardLine{
+			Icon:  "⏱",
+			Label: "Last drop",
+			Value: fmt.Sprintf("%s (%s)", humanizeAge(lastDrop.At), lastDrop.Reason),
+		})
+	}
+
+	color := ui.ColOK
+	if containerState != "running" || watcherPID == 0 || tunnelPID == 0 {
+		color = ui.ColWarn
+	}
+	ui.SummaryCard(color, card)
+	fmt.Println()
+	return 0
+}
+
+func statusIcon(ok bool) string {
+	if ok {
+		return "🟢"
+	}
+	return "⚪"
+}
+
+func pidValue(pid int) string {
+	if pid <= 0 {
+		return "not running"
+	}
+	return fmt.Sprintf("running (pid %d)", pid)
+}
+
+func containerValue(state, ip string) string {
+	switch state {
+	case "running":
+		if ip != "" {
+			return fmt.Sprintf("running (ppp0 %s)", ip)
+		}
+		return "running (ppp0 not up)"
+	case "absent":
+		return "not present"
+	default:
+		return state
+	}
+}
+
+func tunnelValue(pid int, device string) string {
+	dev := strings.TrimSpace(device)
+	if pid <= 0 {
+		return "not running"
+	}
+	if !state.ProcessAlive(pid) {
+		return fmt.Sprintf("dead (stale pid %d)", pid)
+	}
+	if dev == "" {
+		return fmt.Sprintf("running (pid %d)", pid)
+	}
+	return fmt.Sprintf("%s (pid %d)", dev, pid)
+}
+
+func humanizeAge(at time.Time) string {
+	d := time.Since(at)
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds ago", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return at.Local().Format("2006-01-02 15:04")
+	}
 }
 
 // =====================================================================
@@ -433,6 +621,125 @@ func runTunnel(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// =====================================================================
+//  _watcher (internal, runs detached as a daemon after `start`)
+// =====================================================================
+
+// runWatcher monitors the VPN container and, when it exits (typically because
+// the OTP got burned by a reconnect attempt after Mac sleep), notifies the
+// user, pops a native macOS dialog asking for a fresh OTP, restarts the
+// container, and validates that ppp0 actually came back up before declaring
+// success.
+//
+// The watcher exits cleanly on SIGTERM (sent by `packxy stop`). If the user
+// dismisses the OTP dialog, the tunnel and DNS resolvers are torn down on a
+// best-effort basis so traffic isn't silently black-holed.
+func runWatcher(args []string) int {
+	fs := flag.NewFlagSet("_watcher", flag.ExitOnError)
+	workdir := fs.String("workdir", "", "project directory containing docker-compose.yml")
+	container := fs.String("container", "", "VPN container name to monitor")
+	_ = fs.Parse(args)
+
+	if *workdir == "" || *container == "" {
+		fmt.Fprintln(os.Stderr, "_watcher: -workdir and -container are required")
+		return 1
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		<-sigCh
+		cancel()
+	}()
+
+	logf := func(format string, a ...any) {
+		fmt.Fprintf(os.Stdout, "[%s] "+format+"\n",
+			append([]any{time.Now().Format(time.RFC3339)}, a...)...)
+	}
+
+	logf("watching %s in %s", *container, *workdir)
+
+	for {
+		code, err := dockerd.Wait(ctx, *container)
+		if ctx.Err() != nil {
+			logf("watcher cancelled, exiting")
+			return 0
+		}
+		if err != nil {
+			logf("docker wait failed: %v — retrying in 5s", err)
+			select {
+			case <-ctx.Done():
+				return 0
+			case <-time.After(5 * time.Second):
+			}
+			continue
+		}
+
+		reason := dockerd.Classify(code)
+		logf("container exited with code %d (%s) — notifying user", code, reason)
+		_ = state.WriteLastDrop(time.Now(), reason)
+		_ = macnet.Notify("packxy — VPN disconnected", macnet.OTPDropMessage(reason))
+
+		if !reconnectLoop(ctx, logf, *workdir, *container, reason) {
+			return 0
+		}
+		// On success, fall through to the outer loop's docker wait.
+	}
+}
+
+// reconnectLoop drives the OTP prompt + container restart sequence until the
+// VPN is back up or the user cancels. Returns true on success (continue
+// monitoring) and false on user cancel / fatal failure (watcher should exit).
+func reconnectLoop(ctx context.Context, logf func(string, ...any), workdir, container string, initialReason state.Reason) bool {
+	reason := initialReason
+	for {
+		if ctx.Err() != nil {
+			return false
+		}
+
+		otp, err := macnet.PromptOTPWithReason(reason)
+		if errors.Is(err, macnet.ErrDialogCancelled) {
+			logf("user cancelled OTP prompt — tearing down tunnel and exiting")
+			stopTunnel()
+			_ = macnet.Notify("packxy — VPN disconnected",
+				"Tunnel torn down. Run `packxy start` when you want to reconnect.")
+			return false
+		}
+		if err != nil {
+			logf("OTP dialog failed: %v — exiting", err)
+			_ = macnet.Notify("packxy", "VPN reconnect failed — run `packxy start`.")
+			return false
+		}
+
+		_ = os.Setenv("FORTI_OTP", otp)
+		logf("restarting container with fresh OTP")
+		if err := dockerd.ComposeUp(workdir); err != nil {
+			logf("compose up failed: %v", err)
+			_ = macnet.Notify("packxy", "Container restart failed — retrying with a new OTP.")
+			reason = state.ReasonUnknown
+			continue
+		}
+
+		if err := dockerd.WaitForVPN(container); err != nil {
+			logs := dockerd.ExtractError(container)
+			logf("ppp0 did not come up: %v\n%s", err, logs)
+			// Most common cause: wrong OTP. Stop the container so the next
+			// ComposeUp recreates it cleanly with the next fresh OTP.
+			_ = dockerd.ComposeDown(workdir)
+			reason = state.ReasonAuthExpired
+			_ = macnet.Notify("packxy", "OTP rejected or VPN unreachable — try again.")
+			continue
+		}
+
+		logf("VPN reconnected")
+		_ = macnet.Notify("packxy", "✓ VPN reconnected")
+		return true
+	}
 }
 
 // =====================================================================
