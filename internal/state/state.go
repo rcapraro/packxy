@@ -101,7 +101,7 @@ func WriteDevice(name string) error {
 }
 
 func AppendRoute(cidr string) error {
-	return appendLine(routesFile, cidr)
+	return appendLineUnique(routesFile, cidr)
 }
 
 func ReadRoutes() ([]string, error) {
@@ -109,7 +109,7 @@ func ReadRoutes() ([]string, error) {
 }
 
 func AppendDomain(domain string) error {
-	return appendLine(domainsFile, domain)
+	return appendLineUnique(domainsFile, domain)
 }
 
 func ReadDomains() ([]string, error) {
@@ -176,6 +176,22 @@ func appendLine(name, line string) error {
 	defer f.Close()
 	_, err = f.WriteString(line + "\n")
 	return err
+}
+
+// appendLineUnique appends line to the named state file only if it is not
+// already present. Used by AppendRoute / AppendDomain so re-running `start`
+// without a prior `stop` doesn't accumulate duplicates.
+func appendLineUnique(name, line string) error {
+	existing, err := readLines(name)
+	if err != nil {
+		return err
+	}
+	for _, e := range existing {
+		if e == line {
+			return nil
+		}
+	}
+	return appendLine(name, line)
 }
 
 func readLines(name string) ([]string, error) {
