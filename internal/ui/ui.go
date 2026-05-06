@@ -21,6 +21,9 @@ import (
 
 const boxWidth = 56
 
+// Color is the palette type used by helpers like SummaryCard and Banner.
+type Color = lipgloss.TerminalColor
+
 // Public color palette so callers can pick a tone for banners/cards without
 // re-declaring the same constants. Adaptive entries pick a value tuned for the
 // active terminal background.
@@ -51,7 +54,7 @@ func Page() {
 // Header prints the application banner.
 func Header() {
 	title := primary.Bold(true).Render("📦  P A C K X Y")
-	subtitle := muted.Render("Keep calm and Pack through the Proxy VPN")
+	subtitle := muted.Render("Keep calm! and Pack through the Proxy VPN!")
 	body := title + "\n\n" + subtitle
 
 	box := lipgloss.NewStyle().

@@ -499,10 +499,18 @@ func runStatus() int {
 	containerState, ppp0IP := dockerd.Status(container)
 	lastDrop, hasDrop, _ := state.ReadLastDrop()
 
+	watcherUp := watcherPID > 0
+	containerUp := containerState == "running"
+	tunnelUp := tunnelPID > 0 && state.ProcessAlive(tunnelPID)
+	upCount := boolToInt(watcherUp) + boolToInt(containerUp) + boolToInt(tunnelUp)
+
+	connIcon, connLabel, connColor := connectionState(upCount)
+
 	card := []ui.CardLine{
-		{Icon: statusIcon(watcherPID > 0), Label: "Watcher", Value: pidValue(watcherPID)},
-		{Icon: statusIcon(containerState == "running"), Label: "Container", Value: containerValue(containerState, ppp0IP)},
-		{Icon: statusIcon(tunnelPID > 0 && state.ProcessAlive(tunnelPID)), Label: "Tunnel", Value: tunnelValue(tunnelPID, string(device))},
+		{Icon: connIcon, Label: "Connection", Value: connLabel},
+		{Icon: statusIcon(watcherUp), Label: "Watcher", Value: pidValue(watcherPID)},
+		{Icon: statusIcon(containerUp), Label: "Container", Value: containerValue(containerState, ppp0IP)},
+		{Icon: statusIcon(tunnelUp), Label: "Tunnel", Value: tunnelValue(tunnelPID, string(device))},
 	}
 	if len(routes) > 0 {
 		card = append(card, ui.CardLine{Icon: "🔀", Label: "Routes", Value: strings.Join(routes, ", ")})
@@ -512,17 +520,13 @@ func runStatus() int {
 	}
 	if hasDrop {
 		card = append(card, ui.CardLine{
-			Icon:  "⏱",
+			Icon:  "💔",
 			Label: "Last drop",
 			Value: fmt.Sprintf("%s (%s)", humanizeAge(lastDrop.At), lastDrop.Reason),
 		})
 	}
 
-	color := ui.ColOK
-	if containerState != "running" || watcherPID == 0 || tunnelPID == 0 {
-		color = ui.ColWarn
-	}
-	ui.SummaryCard(color, card)
+	ui.SummaryCard(connColor, card)
 	fmt.Println()
 	return 0
 }
@@ -532,6 +536,24 @@ func statusIcon(ok bool) string {
 		return "🟢"
 	}
 	return "⚪"
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+func connectionState(upCount int) (icon, label string, color ui.Color) {
+	switch upCount {
+	case 3:
+		return "🟢", "Connected", ui.ColOK
+	case 0:
+		return "🔴", "Disconnected", ui.ColFail
+	default:
+		return "🟡", fmt.Sprintf("Partial (%d/3 up)", upCount), ui.ColWarn
+	}
 }
 
 func pidValue(pid int) string {
