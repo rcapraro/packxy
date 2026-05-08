@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/rcapraro/packxy/internal/state"
@@ -104,10 +105,20 @@ func Notify(title, body string) error {
 // macOS .app bundle (.../Contents/MacOS/...). Used to gate cgo notification
 // calls — they only render correctly when the calling process has a bundle
 // identity.
+//
+// Crucially, we resolve the path through any symlinks first: `packxy
+// install` drops a `/usr/local/bin/packxy` symlink that points at the
+// bundled binary, and a user typing `packxy start` would otherwise see
+// `os.Executable()` return the symlink path — which doesn't contain
+// "/Contents/MacOS/", causing us to mis-detect the bundle and fall back to
+// osascript.
 func runningInsideBundle() bool {
 	exe, err := os.Executable()
 	if err != nil {
 		return false
+	}
+	if real, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = real
 	}
 	return strings.Contains(exe, ".app/Contents/MacOS/")
 }

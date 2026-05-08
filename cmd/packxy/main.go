@@ -414,10 +414,20 @@ func cleanupOrphans() {
 // daemon survives the parent's exit. Stdout and stderr are redirected to
 // state/watcher.log. Env (incl. FORTI_*) is inherited so the watcher can
 // rebuild a forti.Config and prompt fresh OTPs on reconnect.
+//
+// The executable path is resolved through any symlinks before launching
+// the child. Without this, a user invoking the CLI through the
+// `/usr/local/bin/packxy` symlink would have the watcher inherit the
+// symlink path as its argv[0], causing both `runningInsideBundle()` and
+// `[NSBundle mainBundle]` to misidentify the process — notifications
+// would silently fall back to osascript with the script-runner icon.
 func spawnWatcher(workdir string) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err
+	}
+	if real, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = real
 	}
 	if err := state.Ensure(); err != nil {
 		return err
@@ -743,6 +753,13 @@ func runWatcher(args []string) int {
 	}
 
 	logf("watcher armed (pid %d), workdir=%s", os.Getpid(), *workdir)
+	if exe, err := os.Executable(); err == nil {
+		if real, err := filepath.EvalSymlinks(exe); err == nil {
+			exe = real
+		}
+		bundled := strings.Contains(exe, ".app/Contents/MacOS/")
+		logf("exe=%s (bundled=%v)", exe, bundled)
+	}
 
 	var wakeFlag atomic.Bool
 	go watchPowerState(ctx, logf, &wakeFlag)
