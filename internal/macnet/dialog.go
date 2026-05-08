@@ -19,19 +19,18 @@ var ErrDialogCancelled = errors.New("dialog cancelled")
 // The OTP is shown in cleartext: it's a 30-second token, hiding it only
 // hides typos.
 //
-// We route the dialog through System Events rather than letting osascript
-// own it. Without a host app, macOS attributes osascript dialogs to a
-// transient "Script Editor" persona, which makes a script icon appear in
-// the menu bar / Dock. System Events is a long-running system process with
-// its own icon, so the prompt looks native and no spurious icon is added.
+// We tell osascript itself to activate before showing the dialog (`tell me to
+// activate`) — without this, a detached watcher can't claim foreground and
+// the dialog ends up behind other windows. Wrapping the call in `tell
+// application "System Events"` would give a cleaner UI but requires TCC
+// approval for the watcher to control System Events; from a Setsid daemon
+// that approval can't be granted, so we stick to osascript's own context.
 func PromptOTP(message string) (string, error) {
-	script := `tell application "System Events"
-	activate
-	set d to display dialog ` + appleQuote(message) +
+	script := `tell me to activate
+set d to display dialog ` + appleQuote(message) +
 		` default answer "" with title "packxy"` +
 		` buttons {"Cancel", "OK"} default button "OK" cancel button "Cancel"
-	return text returned of d
-end tell`
+return text returned of d`
 
 	cmd := exec.Command("osascript", "-e", script)
 	out, err := cmd.Output()
@@ -83,14 +82,16 @@ func otpMessage(reason state.Reason) string {
 	}
 }
 
-// Notify posts a native macOS notification via osascript routed through
-// System Events. The notification shows the AppleScript script-runner icon
-// — Apple's CLI surface for user notifications doesn't expose a way to
-// override it from a non-bundled tool — but routing through System Events
-// avoids the transient script icon appearing elsewhere in the UI.
+// Notify posts a native macOS notification via osascript. The notification
+// shows the AppleScript script-runner icon — Apple's CLI surface for user
+// notifications doesn't expose a way to override it from a non-bundled tool.
+//
+// Routing through `tell application "System Events"` would suppress the
+// icon side-effects, but requires TCC Automation permission that a Setsid
+// daemon can't request. We accept the script icon in exchange for
+// reliability from the watcher process.
 func Notify(title, body string) error {
-	script := `tell application "System Events" to display notification ` +
-		appleQuote(body) + ` with title ` + appleQuote(title)
+	script := `display notification ` + appleQuote(body) + ` with title ` + appleQuote(title)
 	return exec.Command("osascript", "-e", script).Run()
 }
 
