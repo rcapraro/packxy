@@ -24,21 +24,36 @@ jobs:
         id: ver
         run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
 
+      # cgo is required (IOKit power-state notifications). The macos-latest
+      # runner ships a universal Xcode SDK, so `cc -arch <target>`
+      # cross-compiles to either arm64 or x86_64 from the same host.
       - name: Build darwin/arm64
+        env:
+          CGO_ENABLED: "1"
+          GOOS: darwin
+          GOARCH: arm64
+          CC: cc -arch arm64
         run: |
           mkdir -p build
-          GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w" \
+          go build -trimpath -ldflags="-s -w" \
             -o build/packxy-arm64 ./cmd/packxy
 
       - name: Build darwin/amd64
+        env:
+          CGO_ENABLED: "1"
+          GOOS: darwin
+          GOARCH: amd64
+          CC: cc -arch x86_64
         run: |
-          GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="-s -w" \
+          go build -trimpath -ldflags="-s -w" \
             -o build/packxy-amd64 ./cmd/packxy
 
       - name: Create universal binary
         run: |
           lipo -create -output build/packxy-universal \
             build/packxy-arm64 build/packxy-amd64
+          file build/packxy-arm64
+          file build/packxy-amd64
           file build/packxy-universal
 
       - name: Package archives
@@ -50,6 +65,7 @@ jobs:
             mkdir -p "${stage}"
             cp "build/packxy-${arch}" "${stage}/packxy"
             cp README.md "${stage}/" 2>/dev/null || true
+            cp .env.sample "${stage}/" 2>/dev/null || true
             tar -czf "dist/packxy-${V}-darwin-${arch}.tar.gz" -C "${stage}" .
           done
 
@@ -65,3 +81,29 @@ jobs:
             dist/checksums.txt
           generate_release_notes: true
           fail_on_unmatched_files: true
+          body: |
+            ## Installation
+
+            1. Download the universal archive for your Mac (`packxy-${{ steps.ver.outputs.version }}-darwin-universal.tar.gz`) or the arch-specific one.
+            2. Extract:
+               ```bash
+               tar -xzf packxy-*.tar.gz
+               chmod +x packxy
+               ```
+            3. One-time setup (writes the sudoers drop-in and the pppd peer file — sudo prompt once):
+               ```bash
+               ./packxy install
+               ```
+            4. Configure `.env` (see `.env.sample`) and connect:
+               ```bash
+               cp .env.sample .env
+               # edit .env: FORTI_HOST, FORTI_USER, FORTI_PASS, VPN_ROUTES, VPN_DNS, VPN_DOMAINS
+               ./packxy start
+               ```
+
+            See the [README](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md) for the full guide.
+
+            ## Verify download
+            ```bash
+            shasum -a 256 -c checksums.txt
+            ```

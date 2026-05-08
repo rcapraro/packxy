@@ -1,38 +1,41 @@
 // Command packxy is a self-contained macOS split-tunneling launcher for FortiGate VPN.
 //
-// It pilots a Docker container running openfortivpn + dante (SOCKS5 proxy on
-// :1080) and embeds tun2socks (xjasonlyu/tun2socks/v2/engine) to route traffic
-// for the configured CIDRs through the proxy at the network layer.
+// It runs openfortivpn natively as a subprocess, creating a ppp0
+// interface on the host. macOS routes for the configured CIDRs are pointed at
+// ppp0, and /etc/resolver entries are written for the configured internal
+// domains. The default route and /etc/resolv.conf are left untouched —
+// openfortivpn is configured with set-routes=0 / set-dns=0 and pppd with
+// nodefaultroute to preserve split tunneling.
 //
 // Subcommands:
 //
-//	packxy start     — launch the VPN container, embedded tunnel, routes and DNS
+//	packxy install   — one-time: install sudoers drop-in + /etc/ppp/peers/packxy
+//	packxy uninstall — remove the install artifacts
+//	packxy start     — launch openfortivpn, add routes/DNS, arm the watcher
 //	packxy stop      — tear everything down
-//	packxy _tunnel   — internal: runs the embedded engine as root (re-exec target)
-//	packxy _watcher  — internal: monitors the VPN container and prompts for a
-//	                   fresh OTP when it dies (e.g. after Mac sleep)
+//	packxy status    — show watcher / VPN / routes state
+//	packxy _watcher  — internal: monitors openfortivpn and re-prompts OTP on drop
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
-	"github.com/rcapraro/packxy/internal/dockerd"
 	"github.com/rcapraro/packxy/internal/envcfg"
+	"github.com/rcapraro/packxy/internal/forti"
 	"github.com/rcapraro/packxy/internal/macnet"
 	"github.com/rcapraro/packxy/internal/state"
-	"github.com/rcapraro/packxy/internal/tunnel"
 	"github.com/rcapraro/packxy/internal/ui"
 )
 
@@ -48,8 +51,10 @@ func main() {
 		os.Exit(runStop())
 	case "status":
 		os.Exit(runStatus())
-	case "_tunnel":
-		os.Exit(runTunnel(os.Args[2:]))
+	case "install":
+		os.Exit(runInstall())
+	case "uninstall":
+		os.Exit(runUninstall())
 	case "_watcher":
 		os.Exit(runWatcher(os.Args[2:]))
 	case "-h", "--help", "help":
@@ -67,13 +72,74 @@ func usage() {
 	ui.Line("packxy <command>")
 
 	ui.Section("Commands")
+	ui.KeyValue("install", "One-time setup (sudoers drop-in + pppd peer file)")
+	ui.KeyValue("uninstall", "Remove the install artifacts")
 	ui.KeyValue("start", "Connect to VPN and enable split tunneling")
 	ui.KeyValue("stop", "Disconnect VPN and remove split tunneling")
-	ui.KeyValue("status", "Show watcher, tunnel and VPN container state")
+	ui.KeyValue("status", "Show watcher and VPN state")
 
 	ui.Section("Options")
 	ui.KeyValue("-h, --help", "Show this message")
 	fmt.Println()
+}
+
+// =====================================================================
+//  install / uninstall
+// =====================================================================
+
+func runInstall() int {
+	bin, err := forti.FindBinary()
+	if err != nil {
+		ui.PrintErr("%v", err)
+		return 1
+	}
+
+	u, err := user.Current()
+	if err != nil {
+		ui.PrintErr("could not determine current user: %v", err)
+		return 1
+	}
+
+	ui.Page()
+	ui.Header()
+	ui.Section("Install")
+	ui.StepInfo("This will write:")
+	ui.Line(fmt.Sprintf("  • %s (sudoers drop-in)", forti.SudoersPath))
+	ui.Line(fmt.Sprintf("  • /etc/ppp/peers/%s (pppd options)", forti.PeerName))
+	fmt.Println()
+	ui.StepInfo("sudo password may be required.")
+
+	if err := macnet.SudoValidate(); err != nil {
+		ui.PrintErr("sudo authentication failed.")
+		return 1
+	}
+
+	if err := forti.Install(u.Username, bin, forti.DefaultLCPEchoInterval, forti.DefaultLCPEchoFailure); err != nil {
+		ui.PrintErr("install failed: %v", err)
+		return 1
+	}
+	ui.StepOK("Installed sudoers drop-in for " + u.Username)
+	ui.StepOK("Installed /etc/ppp/peers/" + forti.PeerName)
+	fmt.Println()
+	return 0
+}
+
+func runUninstall() int {
+	ui.Page()
+	ui.Header()
+	ui.Section("Uninstall")
+	ui.StepInfo("sudo password may be required.")
+	if err := macnet.SudoValidate(); err != nil {
+		ui.PrintErr("sudo authentication failed.")
+		return 1
+	}
+	if err := forti.Uninstall(); err != nil {
+		ui.PrintErr("uninstall failed: %v", err)
+		return 1
+	}
+	ui.StepOK("Removed packxy install artifacts")
+	fmt.Println()
+	return 0
 }
 
 // =====================================================================
@@ -99,7 +165,17 @@ func runStart() int {
 		return 1
 	}
 
-	ui.StepInfo("sudo is needed for the tunnel interface and DNS entries.")
+	if !forti.IsInstalled() {
+		ui.PrintErr("packxy is not installed — run `packxy install` first.")
+		return 1
+	}
+
+	if _, err := forti.FindBinary(); err != nil {
+		ui.PrintErr("%v", err)
+		return 1
+	}
+
+	ui.StepInfo("sudo is needed for routes and DNS entries.")
 	if err := macnet.SudoValidate(); err != nil {
 		ui.PrintErr("sudo authentication failed.")
 		return 1
@@ -119,44 +195,34 @@ func runStart() int {
 	ui.Header()
 	ui.Section("Pipeline")
 
-	dur, err := ui.Spin("Starting container...", func() error {
-		return dockerd.ComposeUp(workdir)
-	})
-	if err != nil {
-		ui.StepFail("Container failed to start")
-		fmt.Println()
-		ui.MutedHint("     Run docker compose up -d to see the error.")
-		return 1
-	}
-	ui.StepOK("Container started", dur)
+	// Defensive: a previous crashed run might leave an orphan openfortivpn or
+	// stale ppp0. Best-effort cleanup before we try a fresh start.
+	cleanupOrphans()
 
-	container := dockerd.ResolveContainerName(workdir)
+	fcfg := fortiConfig(cfg)
 
-	dur, err = ui.Spin("Connecting to VPN...", func() error {
-		return dockerd.WaitForVPN(container)
+	var p *forti.Process
+	dur, err := ui.Spin("Connecting to VPN...", func() error {
+		var e error
+		p, e = forti.Start(context.Background(), fcfg)
+		return e
 	})
 	if err != nil {
 		ui.Page()
 		ui.Header()
 		ui.Banner(ui.ColFail, "✖ Connection Failed", "")
-		ui.Tagline(ui.ColFail, "Can't Pack today... check credentials and try again 🔧")
-		ui.ErrorCard(dockerd.ExtractError(container))
+		ui.Tagline(ui.ColFail, "Can't Pack today... check credentials 🔧")
+		ui.ErrorCard(forti.ExtractError(filepath.Join(state.Dir, "openfortivpn.log")))
 		fmt.Println()
-		ui.MutedHint("     📋  Full logs: docker compose logs")
+		ui.MutedHint("     📋  Full log: cat /tmp/packxy/openfortivpn.log")
 		fmt.Println()
 		ui.PressEnter("Press Enter to exit...")
 		return 1
 	}
-	ui.StepOK("VPN connected", dur)
+	ui.StepOK("VPN connected (ppp0 "+p.IP+")", dur)
+	_ = state.WriteVPNPID(p.PID)
 
-	dev, err := startEmbeddedTunnel("socks5://127.0.0.1:1080")
-	if err != nil {
-		ui.StepFail("Tunnel setup failed: " + err.Error())
-		return 1
-	}
-	ui.StepOK("Tunnel interface " + dev)
-
-	routes := addRoutes(dev, cfg.VPNRoutes)
+	routes := addRoutes(forti.Iface, cfg.VPNRoutes)
 	if routes != "" {
 		ui.StepOK("Routes  " + routes)
 	}
@@ -166,7 +232,7 @@ func runStart() int {
 		ui.StepOK("DNS     " + domains)
 	}
 
-	if err := spawnWatcher(workdir, container); err != nil {
+	if err := spawnWatcher(workdir); err != nil {
 		ui.StepWarn("Watcher not started: " + err.Error())
 	} else {
 		ui.StepOK("Watcher armed (re-prompts OTP if VPN drops)")
@@ -179,7 +245,8 @@ func runStart() int {
 	ui.Section("Connection")
 
 	card := []ui.CardLine{
-		{Icon: "🌐", Label: "Proxy", Value: "127.0.0.1:1080"},
+		{Icon: "🌐", Label: "VPN IP", Value: p.IP},
+		{Icon: "🔌", Label: "Iface", Value: forti.Iface},
 		{Icon: "🔀", Label: "Routes", Value: routes},
 	}
 	if domains != "" {
@@ -254,10 +321,37 @@ func exportEnv(cfg *envcfg.Config) {
 	setenv("FORTI_OTP_PROMPT", cfg.OTPPrompt)
 }
 
+// fortiConfig builds a forti.Config from the current envcfg. The OTP is
+// consumed from FORTI_OTP and intended to be burned on the next start; the
+// watcher prompts a fresh one on each reconnect.
+func fortiConfig(cfg *envcfg.Config) forti.Config {
+	return forti.Config{
+		Host:        cfg.Host,
+		Port:        cfg.Port,
+		User:        cfg.User,
+		Password:    cfg.Password,
+		OTP:         cfg.OTP,
+		Realm:       cfg.Realm,
+		TrustedCert: cfg.TrustedCert,
+		NoFTMPush:   cfg.NoFTMPush == "1",
+	}
+}
+
+// cleanupOrphans best-effort kills any leftover openfortivpn process from a
+// previous crashed run and tears down ppp0 if it survived. Called before
+// `forti.Start` so the next openfortivpn invocation isn't denied by /dev/ppp
+// already being in use.
+func cleanupOrphans() {
+	_ = exec.Command("sudo", "-n", "pkill", "-x", "openfortivpn").Run()
+	// Give it a moment so the kernel releases ppp0.
+	time.Sleep(200 * time.Millisecond)
+}
+
 // spawnWatcher re-execs ourselves as `packxy _watcher` in a new session so the
 // daemon survives the parent's exit. Stdout and stderr are redirected to
-// state/watcher.log. The PID is recorded in state for `packxy stop`.
-func spawnWatcher(workdir, container string) error {
+// state/watcher.log. Env (incl. FORTI_*) is inherited so the watcher can
+// rebuild a forti.Config and prompt fresh OTPs on reconnect.
+func spawnWatcher(workdir string) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err
@@ -276,7 +370,7 @@ func spawnWatcher(workdir, container string) error {
 		return err
 	}
 
-	cmd := exec.Command(exe, "_watcher", "-workdir", workdir, "-container", container)
+	cmd := exec.Command(exe, "_watcher", "-workdir", workdir)
 	cmd.Env = os.Environ()
 	cmd.Stdin = devNull
 	cmd.Stdout = logF
@@ -287,7 +381,6 @@ func spawnWatcher(workdir, container string) error {
 		_ = devNull.Close()
 		return err
 	}
-	// Close our copies; the child keeps them.
 	_ = logF.Close()
 	_ = devNull.Close()
 
@@ -295,89 +388,8 @@ func spawnWatcher(workdir, container string) error {
 		return err
 	}
 
-	// Reap the child eventually if it dies on its own (unlikely, but tidy).
 	go func() { _ = cmd.Wait() }()
 	return nil
-}
-
-// startEmbeddedTunnel re-execs ourselves under sudo to run the engine as root,
-// reads back the chosen utun device on the child's stdout, and stores its PID
-// in the state directory.
-func startEmbeddedTunnel(proxy string) (string, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	if err := state.Ensure(); err != nil {
-		return "", err
-	}
-
-	cmd := exec.Command("sudo", "-n", exe, "_tunnel",
-		"-proxy", proxy,
-		"-mtu", "1300",
-		"-udp-timeout", "60s",
-		"-loglevel", "warn",
-	)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", err
-	}
-	logF, err := os.Create(filepath.Join(state.Dir, "tunnel.log"))
-	if err != nil {
-		return "", err
-	}
-	cmd.Stderr = logF
-	if err := cmd.Start(); err != nil {
-		_ = logF.Close()
-		return "", err
-	}
-	if err := state.WritePID(cmd.Process.Pid); err != nil {
-		_ = cmd.Process.Kill()
-		return "", err
-	}
-
-	dev, err := readDeviceLine(stdout, 8*time.Second)
-	if err != nil {
-		_ = macnet.SudoKill(cmd.Process.Pid)
-		return "", err
-	}
-	if err := state.WriteDevice(dev); err != nil {
-		return "", err
-	}
-
-	go func() {
-		_ = cmd.Wait()
-	}()
-
-	if err := macnet.IfconfigUp(dev, "198.18.0.1"); err != nil {
-		return "", err
-	}
-	return dev, nil
-}
-
-func readDeviceLine(r io.Reader, timeout time.Duration) (string, error) {
-	type result struct {
-		dev string
-		err error
-	}
-	ch := make(chan result, 1)
-	go func() {
-		scanner := bufio.NewScanner(r)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if strings.HasPrefix(line, "TUNDEV=") {
-				ch <- result{dev: strings.TrimPrefix(line, "TUNDEV=")}
-				return
-			}
-		}
-		ch <- result{err: errors.New("tunnel ended without announcing device")}
-	}()
-	select {
-	case r := <-ch:
-		return r.dev, r.err
-	case <-time.After(timeout):
-		return "", fmt.Errorf("timed out waiting for tunnel device after %s", timeout)
-	}
 }
 
 func addRoutes(dev string, cidrs []string) string {
@@ -412,12 +424,6 @@ func configureDNS(cfg *envcfg.Config) string {
 // =====================================================================
 
 func runStop() int {
-	workdir, err := projectDir()
-	if err != nil {
-		ui.PrintErr("could not locate project directory: %v", err)
-		return 1
-	}
-
 	ui.Page()
 	ui.Header()
 	ui.Section("Teardown")
@@ -426,16 +432,17 @@ func runStop() int {
 		ui.StepOK("Watcher stopped")
 	}
 
-	stopTunnel()
-	ui.StepOK("Tunnel removed")
+	stopVPN()
+	ui.StepOK("VPN stopped")
 
-	dur, err := ui.Spin("Stopping container...", func() error {
-		return dockerd.ComposeDown(workdir)
-	})
-	if err != nil {
-		ui.StepWarn("Container down failed: " + err.Error())
-	} else {
-		ui.StepOK("Container stopped", dur)
+	if domains, err := state.ReadDomains(); err == nil {
+		for _, d := range domains {
+			_ = macnet.RemoveResolver(d)
+		}
+	}
+
+	if err := state.Clear(); err != nil {
+		ui.StepWarn("State cleanup failed: " + err.Error())
 	}
 
 	ui.Page()
@@ -460,19 +467,44 @@ func stopWatcher() bool {
 	if err := proc.Signal(syscall.SIGTERM); err != nil {
 		return false
 	}
+	// Give the watcher a moment to clean up.
+	for i := 0; i < 10; i++ {
+		if !state.ProcessAlive(pid) {
+			return true
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 	return true
 }
 
-func stopTunnel() {
-	if pid, err := state.ReadPID(); err == nil && pid > 0 {
-		_ = macnet.SudoKill(pid)
-	}
-	if domains, err := state.ReadDomains(); err == nil {
-		for _, d := range domains {
-			_ = macnet.RemoveResolver(d)
+// stopVPN signals openfortivpn to terminate via `sudo -n pkill -x
+// openfortivpn`, which the sudoers drop-in installed by `packxy install`
+// allows without a password. SIGTERM first, then SIGKILL if the process
+// doesn't exit within ~3s. Idempotent: a no-op if openfortivpn isn't
+// running.
+//
+// Using pkill (rather than `sudo kill -TERM <pid>`) lets the watcher stop
+// the VPN even after the original sudo cache has expired — critical for the
+// pre-sleep teardown path, which fires hours into a session.
+func stopVPN() {
+	pid, _ := state.ReadVPNPID()
+	state.ClearVPNPID()
+
+	_ = exec.Command("sudo", "-n", "pkill", "-TERM", "-x", "openfortivpn").Run()
+
+	// Wait for actual exit. If we have a PID, watch it; otherwise sleep
+	// briefly and assume the SIGTERM did the job.
+	if pid > 0 {
+		for i := 0; i < 15; i++ {
+			if !state.ProcessAlive(pid) {
+				return
+			}
+			time.Sleep(200 * time.Millisecond)
 		}
+		_ = exec.Command("sudo", "-n", "pkill", "-KILL", "-x", "openfortivpn").Run()
+		return
 	}
-	_ = state.Clear()
+	time.Sleep(300 * time.Millisecond)
 }
 
 // =====================================================================
@@ -480,37 +512,30 @@ func stopTunnel() {
 // =====================================================================
 
 func runStatus() int {
-	workdir, err := projectDir()
-	if err != nil {
-		ui.PrintErr("could not locate project directory: %v", err)
-		return 1
-	}
-	container := dockerd.ResolveContainerName(workdir)
-
 	ui.Page()
 	ui.Header()
 	ui.Section("Status")
 
 	watcherPID, _ := state.ReadWatcherPID()
-	tunnelPID, _ := state.ReadPID()
-	device, _ := os.ReadFile(filepath.Join(state.Dir, "tun_dev"))
+	vpnPID, _ := state.ReadVPNPID()
 	routes, _ := state.ReadRoutes()
 	domains, _ := state.ReadDomains()
-	containerState, ppp0IP := dockerd.Status(container)
 	lastDrop, hasDrop, _ := state.ReadLastDrop()
 
 	watcherUp := watcherPID > 0
-	containerUp := containerState == "running"
-	tunnelUp := tunnelPID > 0 && state.ProcessAlive(tunnelPID)
-	upCount := boolToInt(watcherUp) + boolToInt(containerUp) + boolToInt(tunnelUp)
+	vpnUp := vpnPID > 0 && state.ProcessAlive(vpnPID)
+	ip := ""
+	if vpnUp {
+		ip = readPPP0IP()
+	}
+	upCount := boolToInt(watcherUp) + boolToInt(vpnUp)
 
 	connIcon, connLabel, connColor := connectionState(upCount)
 
 	card := []ui.CardLine{
 		{Icon: connIcon, Label: "Connection", Value: connLabel},
 		{Icon: statusIcon(watcherUp), Label: "Watcher", Value: pidValue(watcherPID)},
-		{Icon: statusIcon(containerUp), Label: "Container", Value: containerValue(containerState, ppp0IP)},
-		{Icon: statusIcon(tunnelUp), Label: "Tunnel", Value: tunnelValue(tunnelPID, string(device))},
+		{Icon: statusIcon(vpnUp), Label: "VPN", Value: vpnValue(vpnPID, ip)},
 	}
 	if len(routes) > 0 {
 		card = append(card, ui.CardLine{Icon: "🔀", Label: "Routes", Value: strings.Join(routes, ", ")})
@@ -531,6 +556,20 @@ func runStatus() int {
 	return 0
 }
 
+func readPPP0IP() string {
+	out, err := exec.Command("ifconfig", forti.Iface).Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(strings.TrimSpace(line))
+		if len(f) >= 2 && f[0] == "inet" {
+			return f[1]
+		}
+	}
+	return ""
+}
+
 func statusIcon(ok bool) string {
 	if ok {
 		return "🟢"
@@ -547,12 +586,12 @@ func boolToInt(b bool) int {
 
 func connectionState(upCount int) (icon, label string, color ui.Color) {
 	switch upCount {
-	case 3:
+	case 2:
 		return "🟢", "Connected", ui.ColOK
 	case 0:
 		return "🔴", "Disconnected", ui.ColFail
 	default:
-		return "🟡", fmt.Sprintf("Partial (%d/3 up)", upCount), ui.ColWarn
+		return "🟡", fmt.Sprintf("Partial (%d/2 up)", upCount), ui.ColWarn
 	}
 }
 
@@ -563,32 +602,17 @@ func pidValue(pid int) string {
 	return fmt.Sprintf("running (pid %d)", pid)
 }
 
-func containerValue(state, ip string) string {
-	switch state {
-	case "running":
-		if ip != "" {
-			return fmt.Sprintf("running (ppp0 %s)", ip)
-		}
-		return "running (ppp0 not up)"
-	case "absent":
-		return "not present"
-	default:
-		return state
-	}
-}
-
-func tunnelValue(pid int, device string) string {
-	dev := strings.TrimSpace(device)
+func vpnValue(pid int, ip string) string {
 	if pid <= 0 {
 		return "not running"
 	}
 	if !state.ProcessAlive(pid) {
 		return fmt.Sprintf("dead (stale pid %d)", pid)
 	}
-	if dev == "" {
-		return fmt.Sprintf("running (pid %d)", pid)
+	if ip == "" {
+		return fmt.Sprintf("running (pid %d, %s not up)", pid, forti.Iface)
 	}
-	return fmt.Sprintf("%s (pid %d)", dev, pid)
+	return fmt.Sprintf("%s %s (pid %d)", forti.Iface, ip, pid)
 }
 
 func humanizeAge(at time.Time) string {
@@ -606,68 +630,39 @@ func humanizeAge(at time.Time) string {
 }
 
 // =====================================================================
-//  _tunnel (internal, runs as root via sudo)
+//  _watcher (internal, runs detached after `start`)
 // =====================================================================
 
-func runTunnel(args []string) int {
-	fs := flag.NewFlagSet("_tunnel", flag.ExitOnError)
-	proxy := fs.String("proxy", "socks5://127.0.0.1:1080", "SOCKS5 proxy")
-	mtu := fs.Int("mtu", 1300, "TUN MTU")
-	udpTO := fs.Duration("udp-timeout", 60*time.Second, "UDP session timeout")
-	logLevel := fs.String("loglevel", "warn", "log level")
-	_ = fs.Parse(args)
-
-	if os.Geteuid() != 0 {
-		ui.PrintErr("_tunnel must run as root (re-exec via sudo)")
-		return 1
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
-	go func() {
-		<-sigCh
-		cancel()
-	}()
-
-	opts := tunnel.RunOptions{
-		Proxy:    *proxy,
-		MTU:      *mtu,
-		UDPTO:    *udpTO,
-		LogLevel: *logLevel,
-	}
-	if err := tunnel.Run(ctx, opts); err != nil {
-		ui.PrintErr("tunnel: %v", err)
-		return 1
-	}
-	return 0
-}
-
-// =====================================================================
-//  _watcher (internal, runs detached as a daemon after `start`)
-// =====================================================================
-
-// runWatcher monitors the VPN container and, when it exits (typically because
-// the OTP got burned by a reconnect attempt after Mac sleep), notifies the
-// user, pops a native macOS dialog asking for a fresh OTP, restarts the
-// container, and validates that ppp0 actually came back up before declaring
-// success.
+// runWatcher monitors the openfortivpn process and, when it exits (typically
+// because the OTP got burned by a reconnect attempt after Mac sleep), notifies
+// the user, pops a native macOS dialog asking for a fresh OTP, restarts
+// openfortivpn, and validates that ppp0 came back up before declaring success.
+//
+// In addition to the main monitor loop, one parallel goroutine consumes
+// macOS power-state events (`macnet.StreamSleepWake`):
+//
+//   - SleepEvent:  fired just before the kernel suspends. The watcher
+//     proactively `pkill`s openfortivpn so the FortiGate session is released
+//     cleanly and the PID-poll loop unblocks immediately on wake instead of
+//     waiting for the LCP echo timeout (~60s).
+//   - WakeEvent:   fired once the system has fully resumed. Sets a flag so
+//     the next openfortivpn-exit reason is reported as ReasonWake (with the
+//     corresponding user-facing OTP-dialog message).
 //
 // The watcher exits cleanly on SIGTERM (sent by `packxy stop`). If the user
-// dismisses the OTP dialog, the tunnel and DNS resolvers are torn down on a
+// dismisses the OTP dialog, the routes/resolvers are torn down on a
 // best-effort basis so traffic isn't silently black-holed.
 func runWatcher(args []string) int {
 	fs := flag.NewFlagSet("_watcher", flag.ExitOnError)
-	workdir := fs.String("workdir", "", "project directory containing docker-compose.yml")
-	container := fs.String("container", "", "VPN container name to monitor")
+	workdir := fs.String("workdir", "", "project directory")
 	_ = fs.Parse(args)
 
-	if *workdir == "" || *container == "" {
-		fmt.Fprintln(os.Stderr, "_watcher: -workdir and -container are required")
+	if *workdir == "" {
+		fmt.Fprintln(os.Stderr, "_watcher: -workdir is required")
 		return 1
 	}
+
+	defer state.ClearWatcherPID(os.Getpid())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -684,50 +679,132 @@ func runWatcher(args []string) int {
 			append([]any{time.Now().Format(time.RFC3339)}, a...)...)
 	}
 
-	logf("watching %s in %s", *container, *workdir)
+	logf("watcher armed (pid %d), workdir=%s", os.Getpid(), *workdir)
+
+	var wakeFlag atomic.Bool
+	go watchPowerState(ctx, logf, &wakeFlag)
 
 	for {
-		code, err := dockerd.Wait(ctx, *container)
+		pid, _ := state.ReadVPNPID()
+		if pid <= 0 {
+			logf("no VPN PID in state — exiting")
+			return 0
+		}
+
+		// Wait for openfortivpn to die (poll, since the process is not our
+		// child — runStart spawned it). 3s polling is fine: pre-sleep
+		// teardown delivers death within milliseconds of wake, and other
+		// drop causes (link silent, peer reset) tolerate a few seconds.
+		for state.ProcessAlive(pid) {
+			select {
+			case <-ctx.Done():
+				logf("watcher cancelled, exiting")
+				return 0
+			case <-time.After(3 * time.Second):
+			}
+		}
+
 		if ctx.Err() != nil {
 			logf("watcher cancelled, exiting")
 			return 0
 		}
-		if err != nil {
-			logf("docker wait failed: %v — retrying in 5s", err)
-			select {
-			case <-ctx.Done():
-				return 0
-			case <-time.After(5 * time.Second):
-			}
-			continue
-		}
 
-		reason := dockerd.Classify(code)
-		logf("container exited with code %d (%s) — notifying user", code, reason)
+		reason := forti.ClassifyFromLog(filepath.Join(state.Dir, "openfortivpn.log"))
+		if wakeFlag.Swap(false) {
+			reason = state.ReasonWake
+		}
+		logf("openfortivpn pid %d gone (%s) — notifying user", pid, reason)
+		state.ClearVPNPID()
 		_ = state.WriteLastDrop(time.Now(), reason)
 		_ = macnet.Notify("packxy — VPN disconnected", macnet.OTPDropMessage(reason))
 
-		if !reconnectLoop(ctx, logf, *workdir, *container, reason) {
+		if !reconnectLoop(ctx, logf, reason) {
 			return 0
 		}
-		// On success, fall through to the outer loop's docker wait.
 	}
 }
 
-// reconnectLoop drives the OTP prompt + container restart sequence until the
-// VPN is back up or the user cancels. Returns true on success (continue
+// watchPowerState consumes macOS sleep/wake notifications and reacts:
+//
+//   - On SleepEvent: pkill openfortivpn so the FortiGate session is released
+//     before the kernel suspends. Sets wakeFlag so the next reconnect uses
+//     the wake-flavoured Reason.
+//   - On WakeEvent: just sets wakeFlag (the proactive pkill on sleep means
+//     the PID-poll loop is already in reconnect path by the time we wake).
+//
+// IOKit notifications are precise (millisecond-level) and have no false
+// positives from CPU stalls — a strict upgrade over the prior clock-jump
+// heuristic.
+func watchPowerState(ctx context.Context, logf func(string, ...any), wakeFlag *atomic.Bool) {
+	events := macnet.StreamSleepWake()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev := <-events:
+			switch ev {
+			case macnet.SleepEvent:
+				logf("sleep notification — releasing VPN session")
+				wakeFlag.Store(true)
+				stopVPN()
+			case macnet.WakeEvent:
+				logf("wake notification")
+				wakeFlag.Store(true)
+			}
+		}
+	}
+}
+
+// reconnectLoop drives the OTP prompt + openfortivpn restart sequence until
+// the VPN is back up or the user cancels. Returns true on success (continue
 // monitoring) and false on user cancel / fatal failure (watcher should exit).
-func reconnectLoop(ctx context.Context, logf func(string, ...any), workdir, container string, initialReason state.Reason) bool {
+//
+// Two failure paths with distinct backoff:
+//   - authFails: forti.Start returned an error after an OTP attempt.
+//     Each attempt costs one auth try against FortiGate, so we cap at 4 (one
+//     under the typical 5-attempt lockout threshold) and apply growing delays.
+//   - infraFails: forti.Start failed before reaching auth (binary missing,
+//     /dev/ppp permission denied). No auth was attempted; back off briefly.
+func reconnectLoop(ctx context.Context, logf func(string, ...any), initialReason state.Reason) bool {
+	const maxAuthFails = 4
+	authBackoff := []time.Duration{
+		0,
+		30 * time.Second,
+		2 * time.Minute,
+		5 * time.Minute,
+		10 * time.Minute,
+	}
+	authFails := 0
+	infraFails := 0
 	reason := initialReason
+
 	for {
 		if ctx.Err() != nil {
 			return false
 		}
 
+		if authFails >= maxAuthFails {
+			logf("auth failure ceiling reached (%d) — stopping to avoid lockout", authFails)
+			_ = macnet.Notify("packxy",
+				"Multiple OTP failures — stopping to avoid FortiGate lockout. "+
+					"Run `packxy stop && packxy start` when ready.")
+			tearDownNetwork()
+			return false
+		}
+
+		if delay := authBackoff[min(authFails, len(authBackoff)-1)]; delay > 0 {
+			logf("waiting %s before next OTP prompt (auth fails=%d)", delay, authFails)
+			select {
+			case <-ctx.Done():
+				return false
+			case <-time.After(delay):
+			}
+		}
+
 		otp, err := macnet.PromptOTPWithReason(reason)
 		if errors.Is(err, macnet.ErrDialogCancelled) {
-			logf("user cancelled OTP prompt — tearing down tunnel and exiting")
-			stopTunnel()
+			logf("user cancelled OTP prompt — tearing down and exiting")
+			tearDownNetwork()
 			_ = macnet.Notify("packxy — VPN disconnected",
 				"Tunnel torn down. Run `packxy start` when you want to reconnect.")
 			return false
@@ -739,28 +816,73 @@ func reconnectLoop(ctx context.Context, logf func(string, ...any), workdir, cont
 		}
 
 		_ = os.Setenv("FORTI_OTP", otp)
-		logf("restarting container with fresh OTP")
-		if err := dockerd.ComposeUp(workdir); err != nil {
-			logf("compose up failed: %v", err)
-			_ = macnet.Notify("packxy", "Container restart failed — retrying with a new OTP.")
-			reason = state.ReasonUnknown
+		logf("restarting openfortivpn with fresh OTP")
+
+		fcfg := forti.Config{
+			Host:        os.Getenv("FORTI_HOST"),
+			Port:        os.Getenv("FORTI_PORT"),
+			User:        os.Getenv("FORTI_USER"),
+			Password:    os.Getenv("FORTI_PASS"),
+			OTP:         otp,
+			Realm:       os.Getenv("FORTI_REALM"),
+			TrustedCert: os.Getenv("FORTI_TRUSTED_CERT"),
+			NoFTMPush:   os.Getenv("FORTI_NO_FTM_PUSH") == "1",
+		}
+
+		p, err := forti.Start(ctx, fcfg)
+		if err != nil {
+			// Distinguish auth fail (log shows auth error) from infra fail.
+			if forti.ClassifyFromLog(filepath.Join(state.Dir, "openfortivpn.log")) == state.ReasonAuthExpired {
+				authFails++
+				logf("OTP rejected (%d/%d): %v", authFails, maxAuthFails, err)
+				_ = macnet.Notify("packxy",
+					fmt.Sprintf("OTP rejected (%d/%d) — try again.", authFails, maxAuthFails))
+				reason = state.ReasonAuthExpired
+				continue
+			}
+			infraFails++
+			delay := infraBackoff(infraFails)
+			logf("openfortivpn start failed: %v (infra fail %d, sleeping %s)", err, infraFails, delay)
+			_ = macnet.Notify("packxy", "VPN restart failed — will retry.")
+			select {
+			case <-ctx.Done():
+				return false
+			case <-time.After(delay):
+			}
+			reason = state.ReasonStartupFailure
 			continue
 		}
 
-		if err := dockerd.WaitForVPN(container); err != nil {
-			logs := dockerd.ExtractError(container)
-			logf("ppp0 did not come up: %v\n%s", err, logs)
-			// Most common cause: wrong OTP. Stop the container so the next
-			// ComposeUp recreates it cleanly with the next fresh OTP.
-			_ = dockerd.ComposeDown(workdir)
-			reason = state.ReasonAuthExpired
-			_ = macnet.Notify("packxy", "OTP rejected or VPN unreachable — try again.")
-			continue
-		}
-
-		logf("VPN reconnected")
+		_ = state.WriteVPNPID(p.PID)
+		logf("VPN reconnected (ppp0 %s, pid %d) after %d auth fail(s), %d infra fail(s)",
+			p.IP, p.PID, authFails, infraFails)
 		_ = macnet.Notify("packxy", "✓ VPN reconnected")
 		return true
+	}
+}
+
+// tearDownNetwork removes routes/resolvers and kills openfortivpn. Called when
+// the watcher gives up (user cancel or auth lockout) so traffic isn't
+// silently black-holed.
+func tearDownNetwork() {
+	if domains, err := state.ReadDomains(); err == nil {
+		for _, d := range domains {
+			_ = macnet.RemoveResolver(d)
+		}
+	}
+	stopVPN()
+}
+
+// infraBackoff returns the delay to wait after a `forti.Start` failure that
+// did NOT reach auth. The scale is short because no auth was attempted.
+func infraBackoff(n int) time.Duration {
+	switch {
+	case n <= 1:
+		return 5 * time.Second
+	case n == 2:
+		return 15 * time.Second
+	default:
+		return 60 * time.Second
 	}
 }
 
@@ -770,15 +892,15 @@ func reconnectLoop(ctx context.Context, logf func(string, ...any), workdir, cont
 
 // projectDir returns the directory packxy should treat as the project root.
 //
-// Precedence: $PACKXY_DIR > current working directory if it contains
-// docker-compose.yml > directory containing the running executable.
+// Precedence: $PACKXY_DIR > current working directory if it contains .env >
+// directory containing the running executable.
 func projectDir() (string, error) {
 	if v := os.Getenv("PACKXY_DIR"); v != "" {
 		return v, nil
 	}
 	cwd, err := os.Getwd()
 	if err == nil {
-		if _, err := os.Stat(filepath.Join(cwd, "docker-compose.yml")); err == nil {
+		if _, err := os.Stat(filepath.Join(cwd, ".env")); err == nil {
 			return cwd, nil
 		}
 	}

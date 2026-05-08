@@ -8,30 +8,6 @@ import (
 	"strings"
 )
 
-// ListUtunInterfaces returns the set of currently-existing utun devices.
-func ListUtunInterfaces() (map[string]struct{}, error) {
-	out, err := exec.Command("ifconfig", "-l").Output()
-	if err != nil {
-		return nil, err
-	}
-	set := make(map[string]struct{})
-	for _, name := range strings.Fields(string(out)) {
-		if strings.HasPrefix(name, "utun") {
-			set[name] = struct{}{}
-		}
-	}
-	return set, nil
-}
-
-// IfconfigUp configures the device with a point-to-point address and brings it up.
-func IfconfigUp(dev, addr string) error {
-	cmd := exec.Command("sudo", "-n", "ifconfig", dev, addr, addr, "up")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("ifconfig %s: %v: %s", dev, err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
 // AddRoute adds a network route through the given interface.
 func AddRoute(cidr, dev string) error {
 	cmd := exec.Command("sudo", "-n", "route", "-q", "add", "-net", cidr, "-interface", dev)

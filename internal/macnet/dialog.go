@@ -49,7 +49,11 @@ func OTPDropMessage(reason state.Reason) string {
 	case state.ReasonAuthExpired:
 		return "2FA token expired (likely after Mac sleep). Enter a fresh code to reconnect."
 	case state.ReasonNetworkDrop:
-		return "VPN connection lost after several reconnect attempts. A new 2FA code is needed."
+		return "VPN link dropped. A fresh 2FA code is needed to reconnect."
+	case state.ReasonWake:
+		return "Mac woke from sleep. Enter a fresh 2FA code to reconnect."
+	case state.ReasonStartupFailure:
+		return "openfortivpn failed to start. Enter a fresh 2FA code to retry."
 	default:
 		return "VPN disconnected. Enter a fresh 2FA code to reconnect."
 	}
@@ -60,13 +64,19 @@ func otpMessage(reason state.Reason) string {
 	case state.ReasonAuthExpired:
 		return "Your 2FA token has expired (typically after a Mac sleep).\nEnter a fresh code to reconnect:"
 	case state.ReasonNetworkDrop:
-		return "VPN connection lost after several reconnect attempts.\nEnter a fresh 2FA code:"
+		return "VPN link dropped (link silent or peer reset).\nEnter a fresh 2FA code:"
+	case state.ReasonWake:
+		return "Mac woke from sleep — VPN tunnel was dropped.\nEnter a fresh 2FA code to reconnect:"
+	case state.ReasonStartupFailure:
+		return "openfortivpn failed to start.\nEnter a fresh 2FA code to retry:"
 	default:
 		return "VPN disconnected. Enter a fresh 2FA code to reconnect:"
 	}
 }
 
-// Notify posts a native macOS notification.
+// Notify posts a native macOS notification via osascript. The notification
+// shows the AppleScript script-runner icon — Apple's CLI surface for user
+// notifications doesn't expose a way to override it from a non-bundled tool.
 func Notify(title, body string) error {
 	script := `display notification ` + appleQuote(body) + ` with title ` + appleQuote(title)
 	return exec.Command("osascript", "-e", script).Run()

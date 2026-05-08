@@ -223,7 +223,7 @@ func Footer() {
 
 	items := []any{
 		keyStyle.Render("Disconnect") + sep + cmdStyle.Render("packxy stop"),
-		keyStyle.Render("Live logs ") + sep + cmdStyle.Render("docker compose logs -f"),
+		keyStyle.Render("VPN logs  ") + sep + cmdStyle.Render("tail -f /tmp/packxy/openfortivpn.log"),
 	}
 
 	l := list.New(items...).

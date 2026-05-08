@@ -10,11 +10,10 @@ import (
 	"time"
 )
 
-const Dir = "/tmp/forti-socks"
+const Dir = "/tmp/packxy"
 
 const (
-	pidFile        = "tun2socks.pid"
-	devFile        = "tun_dev"
+	vpnPIDFile     = "openfortivpn.pid"
 	routesFile     = "routes"
 	domainsFile    = "domains"
 	watcherPIDFile = "watcher.pid"
@@ -31,6 +30,22 @@ func WriteWatcherPID(pid int) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(Dir, watcherPIDFile), []byte(strconv.Itoa(pid)), 0o644)
+}
+
+// ClearWatcherPID removes the watcher PID file only if it still records the
+// given pid. This avoids a race where the defer of an exiting watcher would
+// erase the PID of a freshly spawned successor.
+func ClearWatcherPID(pid int) {
+	path := filepath.Join(Dir, watcherPIDFile)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	current, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || current != pid {
+		return
+	}
+	_ = os.Remove(path)
 }
 
 // ReadWatcherPID returns the watcher PID, or 0 if no watcher is registered or
@@ -78,26 +93,43 @@ func Ensure() error {
 	return os.MkdirAll(Dir, 0o755)
 }
 
-func WritePID(pid int) error {
+// WriteVPNPID stores the openfortivpn process's PID. The watcher writes it so
+// `packxy stop` and `packxy status` can locate the live VPN process.
+func WriteVPNPID(pid int) error {
 	if err := Ensure(); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(Dir, pidFile), []byte(strconv.Itoa(pid)), 0o644)
+	return os.WriteFile(filepath.Join(Dir, vpnPIDFile), []byte(strconv.Itoa(pid)), 0o644)
 }
 
-func ReadPID() (int, error) {
-	b, err := os.ReadFile(filepath.Join(Dir, pidFile))
+// ReadVPNPID returns the openfortivpn PID, or 0 if no PID is recorded or the
+// recorded PID no longer exists.
+func ReadVPNPID() (int, error) {
+	b, err := os.ReadFile(filepath.Join(Dir, vpnPIDFile))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
 	if err != nil {
 		return 0, err
 	}
-	return strconv.Atoi(strings.TrimSpace(string(b)))
+	if pid <= 0 {
+		_ = os.Remove(filepath.Join(Dir, vpnPIDFile))
+		return 0, nil
+	}
+	if !ProcessAlive(pid) {
+		_ = os.Remove(filepath.Join(Dir, vpnPIDFile))
+		return 0, nil
+	}
+	return pid, nil
 }
 
-func WriteDevice(name string) error {
-	if err := Ensure(); err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(Dir, devFile), []byte(name), 0o644)
+// ClearVPNPID removes the openfortivpn PID file.
+func ClearVPNPID() {
+	_ = os.Remove(filepath.Join(Dir, vpnPIDFile))
 }
 
 func AppendRoute(cidr string) error {
@@ -120,14 +152,17 @@ func Clear() error {
 	return os.RemoveAll(Dir)
 }
 
-// Reason classifies why the VPN container exited so callers can present a
+// Reason classifies why the VPN process exited so callers can present a
 // meaningful message to the user.
 type Reason string
 
 const (
-	ReasonAuthExpired Reason = "auth-expired"
-	ReasonNetworkDrop Reason = "network-drop"
-	ReasonUnknown     Reason = "unknown"
+	ReasonAuthExpired    Reason = "auth-expired"
+	ReasonNetworkDrop    Reason = "network-drop"
+	ReasonStartupFailure Reason = "startup-failure"
+	ReasonTunnelDied     Reason = "tunnel-died"
+	ReasonWake           Reason = "wake"
+	ReasonUnknown        Reason = "unknown"
 )
 
 // LastDrop captures the moment and cause of the last VPN drop the watcher saw.
