@@ -493,6 +493,26 @@ func cleanupOrphans() {
 	time.Sleep(200 * time.Millisecond)
 }
 
+// killStrayDaemon kills any process whose command line matches `pattern`
+// — used to defensively clean up stale watcher / tray daemons from an
+// earlier `packxy start` that wasn't followed by `packxy stop`. Runs
+// without sudo because both daemons are owned by the user (only
+// openfortivpn needs privilege escalation, handled by cleanupOrphans).
+//
+// Best-effort: pkill exits 1 if there's no match, which we swallow. We
+// then briefly poll to give the OS a moment to actually reap the
+// processes before returning, so the immediately-following spawn doesn't
+// race a dying tray for the menu bar slot.
+func killStrayDaemon(pattern string) {
+	_ = exec.Command("pkill", "-f", pattern).Run()
+	for i := 0; i < 10; i++ {
+		if exec.Command("pgrep", "-f", pattern).Run() != nil {
+			return // pgrep exit 1 = no match left
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // spawnWatcher re-execs ourselves as `packxy _watcher` in a new session so the
 // daemon survives the parent's exit. Stdout and stderr are redirected to
 // state/watcher.log. Env (incl. FORTI_*) is inherited so the watcher can
@@ -505,6 +525,11 @@ func cleanupOrphans() {
 // `[NSBundle mainBundle]` to misidentify the process — notifications
 // would silently fall back to osascript with the script-runner icon.
 func spawnWatcher(workdir string) error {
+	// Defensive: a `packxy start` re-run without an intervening stop would
+	// otherwise overwrite the watcher PID file and leave the prior watcher
+	// orphaned — still polling, still wired to IOKit, never reaped.
+	killStrayDaemon("packxy _watcher")
+
 	exe, err := os.Executable()
 	if err != nil {
 		return err
@@ -1081,6 +1106,12 @@ func runTray(args []string) int {
 // we don't Setsid — we want to inherit the user's Aqua session. Stdout
 // and stderr go to the tray log.
 func spawnTray() error {
+	// Defensive: clear any orphan tray from a prior `packxy start` that
+	// wasn't paired with `packxy stop`. Without this we'd end up with two
+	// padlock icons in the menu bar, the older one driven by a process
+	// whose PID file we already overwrote and can no longer signal.
+	killStrayDaemon("packxy _tray")
+
 	exe, err := os.Executable()
 	if err != nil {
 		return err
