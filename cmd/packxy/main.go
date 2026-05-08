@@ -150,10 +150,19 @@ const cliSymlinkPath = "/usr/local/bin/packxy"
 // bundleExecutable reports whether the running binary lives inside a .app
 // bundle, and if so returns the absolute path to that binary. Anything
 // else means the user is running the bare CLI without bundle benefits.
+//
+// Resolves symlinks before testing — `packxy install` drops a
+// /usr/local/bin/packxy symlink at the bundled binary, so a user typing
+// `packxy start` would otherwise see os.Executable() return the symlink
+// path (which doesn't match ".app/Contents/MacOS/") and never get the
+// bundle-only features (tray, native dialogs).
 func bundleExecutable() (string, bool) {
 	exe, err := os.Executable()
 	if err != nil {
 		return "", false
+	}
+	if real, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = real
 	}
 	if !strings.Contains(exe, ".app/Contents/MacOS/") {
 		return "", false
