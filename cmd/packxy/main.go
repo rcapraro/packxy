@@ -323,46 +323,76 @@ func runStart() int {
 }
 
 // promptCredentials reconciles the on-disk .env config with what the VPN
-// session needs. Anything already set in .env is shown back to the user as
-// a reminder (no prompt — saves typing and preserves the source of truth);
-// only fields the user truly needs to enter are prompted for. The OTP is
-// always prompted, since it's a 30 s single-use code that has no business
-// living in .env.
+// session needs.
+//
+// Anything already set in .env is shown back as a "📄 From .env" card —
+// the user gets a visual confirmation of what's about to be sent without
+// having to retype it. Only fields the user truly needs to enter are
+// prompted for (always including the OTP, which is a 30 s single-use code
+// that has no business living in .env).
+//
+// The card and the huh-styled prompts are visually distinct (border vs.
+// no border, different colour palette) so the boundary between
+// "remembered" and "to enter" is unambiguous.
 func promptCredentials(cfg *envcfg.Config) error {
-	if err := showOrPromptInput("VPN Hostname", "vpn.company.com", &cfg.Host); err != nil {
-		return err
+	var card []ui.CardLine
+	add := func(icon, label, value string) {
+		if value != "" {
+			card = append(card, ui.CardLine{Icon: icon, Label: label, Value: value})
+		}
 	}
-	if err := showOrPromptInput("VPN Port", "443", &cfg.Port); err != nil {
-		return err
+	add("🌐", "Hostname", cfg.Host)
+	add("🚪", "Port", cfg.Port)
+	add("👤", "Username", cfg.User)
+	if cfg.Password != "" {
+		add("🔑", "Password", "••••••••")
 	}
-	if err := showOrPromptInput("Username", "john.doe", &cfg.User); err != nil {
-		return err
+	if cfg.TrustedCert != "" {
+		add("📜", "Trusted Cert", truncate(cfg.TrustedCert, 28))
+	}
+	if cfg.Realm != "" {
+		add("🎫", "Realm", cfg.Realm)
+	}
+	if len(card) > 0 {
+		ui.StepInfo("From .env:")
+		ui.SummaryCard(ui.ColMuted, card)
+		fmt.Println()
 	}
 
-	if cfg.Password != "" {
-		ui.KeyValue("Password", "••••••••")
-	} else {
+	if cfg.Host == "" {
+		v, err := ui.Input("  VPN Hostname", "vpn.company.com", "")
+		if err != nil {
+			return err
+		}
+		cfg.Host = v
+	}
+	if cfg.Port == "" {
+		v, err := ui.Input("  VPN Port", "443", "")
+		if err != nil {
+			return err
+		}
+		cfg.Port = v
+	}
+	if cfg.User == "" {
+		v, err := ui.Input("  Username", "john.doe", "")
+		if err != nil {
+			return err
+		}
+		cfg.User = v
+	}
+	if cfg.Password == "" {
 		v, err := ui.Password("  Password", "••••••••", "")
 		if err != nil {
 			return err
 		}
 		cfg.Password = v
 	}
-
-	// TrustedCert: prompt only if absent; the SHA-256 fingerprint is too
-	// long to retype interactively, so once .env has it we just remind.
-	if cfg.TrustedCert != "" {
-		ui.KeyValue("Trusted Cert", truncate(cfg.TrustedCert, 24))
-	} else {
+	if cfg.TrustedCert == "" {
 		v, err := ui.Input("  Trusted Certificate (optional)", "sha256 fingerprint...", "")
 		if err != nil {
 			return err
 		}
 		cfg.TrustedCert = v
-	}
-
-	if cfg.Realm != "" {
-		ui.KeyValue("Realm", cfg.Realm)
 	}
 
 	v, err := ui.SixDigitOTP("")
@@ -371,22 +401,6 @@ func promptCredentials(cfg *envcfg.Config) error {
 	}
 	cfg.OTP = v
 
-	return nil
-}
-
-// showOrPromptInput renders the existing value as a KeyValue reminder if
-// it's already in .env; otherwise asks the user with `placeholder` as the
-// hint. The result is written back through `target`.
-func showOrPromptInput(label, placeholder string, target *string) error {
-	if *target != "" {
-		ui.KeyValue(label, *target)
-		return nil
-	}
-	v, err := ui.Input("  "+label, placeholder, "")
-	if err != nil {
-		return err
-	}
-	*target = v
 	return nil
 }
 
