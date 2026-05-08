@@ -16,18 +16,26 @@ var ErrDialogCancelled = errors.New("dialog cancelled")
 
 // PromptOTP shows a native macOS dialog asking for a fresh OTP.
 // Returns the entered code, ErrDialogCancelled on cancel, or another error on
-// osascript failure.
+// failure.
 //
 // The OTP is shown in cleartext: it's a 30-second token, hiding it only
 // hides typos.
 //
-// We tell osascript itself to activate before showing the dialog (`tell me to
-// activate`) — without this, a detached watcher can't claim foreground and
-// the dialog ends up behind other windows. Wrapping the call in `tell
-// application "System Events"` would give a cleaner UI but requires TCC
-// approval for the watcher to control System Events; from a Setsid daemon
-// that approval can't be granted, so we stick to osascript's own context.
+// When packxy runs inside its .app bundle (post-`packxy install`), the
+// dialog is rendered by `cocoaPromptOTP` — a native NSAlert with text
+// input, attributed to our bundle (proper icon, no AppleScript artifacts
+// in the menu bar). When running the bare CLI outside the bundle, falls
+// back to `osascript display dialog`, which works but shows the
+// AppleScript script-runner icon.
 func PromptOTP(message string) (string, error) {
+	if runningInsideBundle() {
+		out, cancelled := cocoaPromptOTP("packxy", message)
+		if cancelled {
+			return "", ErrDialogCancelled
+		}
+		return strings.TrimSpace(out), nil
+	}
+
 	script := `tell me to activate
 set d to display dialog ` + appleQuote(message) +
 		` default answer "" with title "packxy"` +

@@ -935,11 +935,37 @@ func reconnectLoop(ctx context.Context, logf func(string, ...any), initialReason
 
 		_ = state.WriteVPNPID(p.PID)
 		state.ClearLastDrop()
-		logf("VPN reconnected (ppp0 %s, pid %d) after %d auth fail(s), %d infra fail(s)",
-			p.IP, p.PID, authFails, infraFails)
+		// Kernel flushes routes pointing at the previous ppp0 when it
+		// disappears, so re-add the configured CIDRs against the new
+		// interface — otherwise the user's traffic to VPN_ROUTES would
+		// silently leak through the host's default route.
+		readded := readdVPNRoutes(forti.Iface)
+		logf("VPN reconnected (ppp0 %s, pid %d) after %d auth fail(s), %d infra fail(s); routes restored: %s",
+			p.IP, p.PID, authFails, infraFails, readded)
 		_ = macnet.Notify("packxy", "✓ VPN reconnected")
 		return true
 	}
+}
+
+// readdVPNRoutes re-runs `route add -net <cidr> -interface <dev>` for every
+// CIDR recorded in state. Idempotent: a CIDR that's already in the table
+// produces a "File exists" failure which we swallow. Returns the
+// comma-separated list of CIDRs successfully re-installed (for logging).
+func readdVPNRoutes(dev string) string {
+	cidrs, err := state.ReadRoutes()
+	if err != nil || len(cidrs) == 0 {
+		return ""
+	}
+	var ok []string
+	for _, c := range cidrs {
+		if err := macnet.AddRoute(c, dev); err == nil {
+			ok = append(ok, c)
+		}
+	}
+	if len(ok) == 0 {
+		return "(none)"
+	}
+	return strings.Join(ok, ", ")
 }
 
 // tearDownNetwork removes routes/resolvers and kills openfortivpn. Called when
