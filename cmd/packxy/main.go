@@ -322,39 +322,39 @@ func runStart() int {
 	return 0
 }
 
+// promptCredentials reconciles the on-disk .env config with what the VPN
+// session needs. Anything already set in .env is shown back to the user as
+// a reminder (no prompt — saves typing and preserves the source of truth);
+// only fields the user truly needs to enter are prompted for. The OTP is
+// always prompted, since it's a 30 s single-use code that has no business
+// living in .env.
 func promptCredentials(cfg *envcfg.Config) error {
-	v, err := ui.Input("  VPN Hostname", "vpn.company.com", cfg.Host)
-	if err != nil {
+	if err := showOrPromptInput("VPN Hostname", "vpn.company.com", &cfg.Host); err != nil {
 		return err
 	}
-	cfg.Host = v
-
-	v, err = ui.Input("  VPN Port", "443", cfg.Port)
-	if err != nil {
+	if err := showOrPromptInput("VPN Port", "443", &cfg.Port); err != nil {
 		return err
 	}
-	cfg.Port = v
-
-	v, err = ui.Input("  Username", "john.doe", cfg.User)
-	if err != nil {
+	if err := showOrPromptInput("Username", "john.doe", &cfg.User); err != nil {
 		return err
 	}
-	cfg.User = v
 
-	v, err = ui.Password("  Password", "••••••••", cfg.Password)
-	if err != nil {
-		return err
+	if cfg.Password != "" {
+		ui.KeyValue("Password", "••••••••")
+	} else {
+		v, err := ui.Password("  Password", "••••••••", "")
+		if err != nil {
+			return err
+		}
+		cfg.Password = v
 	}
-	cfg.Password = v
 
-	v, err = ui.SixDigitOTP(cfg.OTP)
-	if err != nil {
-		return err
-	}
-	cfg.OTP = v
-
-	if cfg.TrustedCert == "" {
-		v, err = ui.Input("  Trusted Certificate (optional)", "sha256 fingerprint...", "")
+	// TrustedCert: prompt only if absent; the SHA-256 fingerprint is too
+	// long to retype interactively, so once .env has it we just remind.
+	if cfg.TrustedCert != "" {
+		ui.KeyValue("Trusted Cert", truncate(cfg.TrustedCert, 24))
+	} else {
+		v, err := ui.Input("  Trusted Certificate (optional)", "sha256 fingerprint...", "")
 		if err != nil {
 			return err
 		}
@@ -362,13 +362,41 @@ func promptCredentials(cfg *envcfg.Config) error {
 	}
 
 	if cfg.Realm != "" {
-		v, err = ui.Input("  Realm", "", cfg.Realm)
-		if err != nil {
-			return err
-		}
-		cfg.Realm = v
+		ui.KeyValue("Realm", cfg.Realm)
 	}
+
+	v, err := ui.SixDigitOTP("")
+	if err != nil {
+		return err
+	}
+	cfg.OTP = v
+
 	return nil
+}
+
+// showOrPromptInput renders the existing value as a KeyValue reminder if
+// it's already in .env; otherwise asks the user with `placeholder` as the
+// hint. The result is written back through `target`.
+func showOrPromptInput(label, placeholder string, target *string) error {
+	if *target != "" {
+		ui.KeyValue(label, *target)
+		return nil
+	}
+	v, err := ui.Input("  "+label, placeholder, "")
+	if err != nil {
+		return err
+	}
+	*target = v
+	return nil
+}
+
+// truncate shortens a long string for display, replacing the chopped-off
+// tail with a single ellipsis. Used for the SHA-256 trusted-cert reminder.
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "…"
 }
 
 func exportEnv(cfg *envcfg.Config) {
