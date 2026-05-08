@@ -18,8 +18,49 @@ const (
 	domainsFile    = "domains"
 	watcherPIDFile = "watcher.pid"
 	watcherLogFile = "watcher.log"
+	trayPIDFile    = "tray.pid"
+	trayLogFile    = "tray.log"
 	lastDropFile   = "last_drop"
 )
+
+// TrayLogPath is the absolute path of the tray's log file.
+func TrayLogPath() string { return filepath.Join(Dir, trayLogFile) }
+
+// WriteTrayPID stores the menu-bar tray daemon's PID so `packxy stop` can
+// signal it.
+func WriteTrayPID(pid int) error {
+	if err := Ensure(); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(Dir, trayPIDFile), []byte(strconv.Itoa(pid)), 0o644)
+}
+
+// ReadTrayPID returns the tray daemon's PID, or 0 if absent / dead.
+func ReadTrayPID() (int, error) {
+	path := filepath.Join(Dir, trayPIDFile)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 0 {
+		_ = os.Remove(path)
+		return 0, nil
+	}
+	if !ProcessAlive(pid) {
+		_ = os.Remove(path)
+		return 0, nil
+	}
+	return pid, nil
+}
+
+// ClearTrayPID removes the tray PID file.
+func ClearTrayPID() {
+	_ = os.Remove(filepath.Join(Dir, trayPIDFile))
+}
 
 // WatcherLogPath is the absolute path of the watcher's log file.
 func WatcherLogPath() string { return filepath.Join(Dir, watcherLogFile) }

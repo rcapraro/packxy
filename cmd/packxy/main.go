@@ -59,6 +59,8 @@ func main() {
 		os.Exit(runWatcher(os.Args[2:]))
 	case "_otpdialog":
 		os.Exit(runOTPDialog(os.Args[2:]))
+	case "_tray":
+		os.Exit(runTray(os.Args[2:]))
 	case "-h", "--help", "help":
 		usage()
 		os.Exit(0)
@@ -231,7 +233,7 @@ func runStart() int {
 	}
 
 	if !forti.IsInstalled() {
-		ui.PrintErr("packxy is not installed — run `packxy install` first.")
+		ui.PrintErr("Packxy is not installed — run `packxy install` first.")
 		return 1
 	}
 
@@ -301,6 +303,17 @@ func runStart() int {
 		ui.StepWarn("Watcher not started: " + err.Error())
 	} else {
 		ui.StepOK("Watcher armed (re-prompts OTP if VPN drops)")
+	}
+
+	// Tray indicator: only meaningful when packxy was launched from the
+	// .app bundle (otherwise the icon won't carry our identity and the
+	// menu won't render reliably). Skip silently for the bare-CLI flow.
+	if _, bundled := bundleExecutable(); bundled {
+		if err := spawnTray(); err != nil {
+			ui.StepWarn("Menu-bar tray not started: " + err.Error())
+		} else {
+			ui.StepOK("Menu-bar indicator enabled")
+		}
 	}
 
 	ui.Page()
@@ -545,6 +558,10 @@ func runStop() int {
 	ui.Header()
 	ui.Section("Teardown")
 
+	if stopTray() {
+		ui.StepOK("Menu-bar tray stopped")
+	}
+
 	if stopWatcher() {
 		ui.StepOK("Watcher stopped")
 	}
@@ -635,6 +652,7 @@ func runStatus() int {
 
 	watcherPID, _ := state.ReadWatcherPID()
 	vpnPID, _ := state.ReadVPNPID()
+	trayPID, _ := state.ReadTrayPID()
 	routes, _ := state.ReadRoutes()
 	domains, _ := state.ReadDomains()
 	lastDrop, hasDrop, _ := state.ReadLastDrop()
@@ -653,6 +671,13 @@ func runStatus() int {
 		{Icon: connIcon, Label: "Connection", Value: connLabel},
 		{Icon: statusIcon(watcherUp), Label: "Watcher", Value: pidValue(watcherPID)},
 		{Icon: statusIcon(vpnUp), Label: "VPN", Value: vpnValue(vpnPID, ip)},
+	}
+	if trayPID > 0 {
+		card = append(card, ui.CardLine{
+			Icon:  statusIcon(true),
+			Label: "Tray",
+			Value: pidValue(trayPID),
+		})
 	}
 	if len(routes) > 0 {
 		card = append(card, ui.CardLine{Icon: "🔀", Label: "Routes", Value: strings.Join(routes, ", ")})
@@ -840,7 +865,7 @@ func runWatcher(args []string) int {
 		logf("openfortivpn pid %d gone (%s) — notifying user", pid, reason)
 		state.ClearVPNPID()
 		_ = state.WriteLastDrop(time.Now(), reason)
-		_ = macnet.Notify("packxy — VPN disconnected", macnet.OTPDropMessage(reason))
+		_ = macnet.Notify("Packxy — VPN disconnected", macnet.OTPDropMessage(reason))
 
 		if !reconnectLoop(ctx, logf, reason) {
 			return 0
@@ -909,7 +934,7 @@ func reconnectLoop(ctx context.Context, logf func(string, ...any), initialReason
 
 		if authFails >= maxAuthFails {
 			logf("auth failure ceiling reached (%d) — stopping to avoid lockout", authFails)
-			_ = macnet.Notify("packxy",
+			_ = macnet.Notify("Packxy",
 				"Multiple OTP failures — stopping to avoid FortiGate lockout. "+
 					"Run `packxy stop && packxy start` when ready.")
 			tearDownNetwork()
@@ -929,13 +954,13 @@ func reconnectLoop(ctx context.Context, logf func(string, ...any), initialReason
 		if errors.Is(err, macnet.ErrDialogCancelled) {
 			logf("user cancelled OTP prompt — tearing down and exiting")
 			tearDownNetwork()
-			_ = macnet.Notify("packxy — VPN disconnected",
+			_ = macnet.Notify("Packxy — VPN disconnected",
 				"Tunnel torn down. Run `packxy start` when you want to reconnect.")
 			return false
 		}
 		if err != nil {
 			logf("OTP dialog failed: %v — exiting", err)
-			_ = macnet.Notify("packxy", "VPN reconnect failed — run `packxy start`.")
+			_ = macnet.Notify("Packxy", "VPN reconnect failed — run `packxy start`.")
 			return false
 		}
 
@@ -959,7 +984,7 @@ func reconnectLoop(ctx context.Context, logf func(string, ...any), initialReason
 			if forti.ClassifyFromLog(filepath.Join(state.Dir, "openfortivpn.log")) == state.ReasonAuthExpired {
 				authFails++
 				logf("OTP rejected (%d/%d): %v", authFails, maxAuthFails, err)
-				_ = macnet.Notify("packxy",
+				_ = macnet.Notify("Packxy",
 					fmt.Sprintf("OTP rejected (%d/%d) — try again.", authFails, maxAuthFails))
 				reason = state.ReasonAuthExpired
 				continue
@@ -967,7 +992,7 @@ func reconnectLoop(ctx context.Context, logf func(string, ...any), initialReason
 			infraFails++
 			delay := infraBackoff(infraFails)
 			logf("openfortivpn start failed: %v (infra fail %d, sleeping %s)", err, infraFails, delay)
-			_ = macnet.Notify("packxy", "VPN restart failed — will retry.")
+			_ = macnet.Notify("Packxy", "VPN restart failed — will retry.")
 			select {
 			case <-ctx.Done():
 				return false
@@ -986,7 +1011,7 @@ func reconnectLoop(ctx context.Context, logf func(string, ...any), initialReason
 		readded := readdVPNRoutes(forti.Iface)
 		logf("VPN reconnected (ppp0 %s, pid %d) after %d auth fail(s), %d infra fail(s); routes restored: %s",
 			p.IP, p.PID, authFails, infraFails, readded)
-		_ = macnet.Notify("packxy", "✓ VPN reconnected")
+		_ = macnet.Notify("Packxy", "✓ VPN reconnected")
 		return true
 	}
 }
@@ -1038,6 +1063,91 @@ func infraBackoff(n int) time.Duration {
 }
 
 // =====================================================================
+//  _tray (internal, menu-bar status item)
+// =====================================================================
+
+// runTray is the entry point of the menu-bar tray helper. Bootstraps an
+// AppKit run loop (which a Setsid'd watcher can't do) and renders a
+// status item that polls /tmp/packxy state every couple of seconds.
+//
+// Spawned by runStart alongside the watcher; killed by runStop.
+func runTray(args []string) int {
+	_ = args
+	defer state.ClearTrayPID()
+	return macnet.RunTray()
+}
+
+// spawnTray re-execs ourselves as `packxy _tray` in a detached session.
+// Unlike the watcher, the tray needs to interact with WindowServer, so
+// we don't Setsid — we want to inherit the user's Aqua session. Stdout
+// and stderr go to the tray log.
+func spawnTray() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if real, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = real
+	}
+	if err := state.Ensure(); err != nil {
+		return err
+	}
+
+	logF, err := os.OpenFile(state.TrayLogPath(), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		_ = logF.Close()
+		return err
+	}
+
+	cmd := exec.Command(exe, "_tray")
+	cmd.Env = os.Environ()
+	cmd.Stdin = devNull
+	cmd.Stdout = logF
+	cmd.Stderr = logF
+	// No Setsid: NSStatusItem needs to share the user's Aqua session and
+	// WindowServer connection. The process still survives the parent
+	// because launchd reparents it.
+	if err := cmd.Start(); err != nil {
+		_ = logF.Close()
+		_ = devNull.Close()
+		return err
+	}
+	_ = logF.Close()
+	_ = devNull.Close()
+
+	if err := state.WriteTrayPID(cmd.Process.Pid); err != nil {
+		return err
+	}
+	go func() { _ = cmd.Wait() }()
+	return nil
+}
+
+// stopTray signals the menu-bar tray to exit. Best-effort: a missing PID
+// or dead process is fine.
+func stopTray() bool {
+	pid, err := state.ReadTrayPID()
+	if err != nil || pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	_ = proc.Signal(syscall.SIGTERM)
+	for i := 0; i < 10; i++ {
+		if !state.ProcessAlive(pid) {
+			return true
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	return true
+}
+
+// =====================================================================
 //  _otpdialog (internal, child of the watcher)
 // =====================================================================
 
@@ -1055,15 +1165,16 @@ func infraBackoff(n int) time.Duration {
 //	exit 1  : internal error (also written to stderr)
 func runOTPDialog(args []string) int {
 	fs := flag.NewFlagSet("_otpdialog", flag.ExitOnError)
-	message := fs.String("message", "", "dialog message")
+	headline := fs.String("headline", "", "alert headline (messageText)")
+	action := fs.String("action", "", "call to action (informativeText)")
 	_ = fs.Parse(args)
 
-	if *message == "" {
-		fmt.Fprintln(os.Stderr, "_otpdialog: -message is required")
+	if *headline == "" || *action == "" {
+		fmt.Fprintln(os.Stderr, "_otpdialog: -headline and -action are required")
 		return 1
 	}
 
-	out, cancelled := macnet.CocoaPromptOTP("packxy", *message)
+	out, cancelled := macnet.CocoaPromptOTP(*headline, *action)
 	if cancelled {
 		return 2
 	}

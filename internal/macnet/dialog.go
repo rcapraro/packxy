@@ -15,11 +15,16 @@ import (
 var ErrDialogCancelled = errors.New("dialog cancelled")
 
 // PromptOTP shows a native macOS dialog asking for a fresh OTP.
-// Returns the entered code, ErrDialogCancelled on cancel, or another error on
-// failure.
+// Returns the entered code, ErrDialogCancelled on cancel, or another error
+// on failure.
 //
 // The OTP is shown in cleartext: it's a 30-second token, hiding it only
 // hides typos.
+//
+// `headline` is the bold "what happened" line (used as NSAlert's
+// messageText); `action` is the call to action shown beneath it (used as
+// informativeText). Splitting them this way matches Apple's HIG layout
+// for alerts and keeps the dialog readable instead of one wall of text.
 //
 // Two backends:
 //
@@ -33,14 +38,18 @@ var ErrDialogCancelled = errors.New("dialog cancelled")
 //     `osascript display dialog`. Works but shows the AppleScript
 //     script-runner icon and momentarily places a script entry in the
 //     menu bar.
-func PromptOTP(message string) (string, error) {
+func PromptOTP(headline, action string) (string, error) {
 	if runningInsideBundle() {
-		return promptOTPViaChild(message)
+		return promptOTPViaChild(headline, action)
 	}
 
+	// osascript can't render a separate "headline + body" the way NSAlert
+	// does, so fold both into one with a blank line in between for
+	// readability.
+	combined := headline + "\n\n" + action
 	script := `tell me to activate
-set d to display dialog ` + appleQuote(message) +
-		` default answer "" with title "packxy"` +
+set d to display dialog ` + appleQuote(combined) +
+		` default answer "" with title "Packxy"` +
 		` buttons {"Cancel", "OK"} default button "OK" cancel button "Cancel"
 return text returned of d`
 
@@ -56,10 +65,10 @@ return text returned of d`
 	return strings.TrimSpace(string(out)), nil
 }
 
-// promptOTPViaChild spawns `packxy _otpdialog -message <msg>` and reads
-// the user's OTP from the child's stdout. Exit code 2 maps to
+// promptOTPViaChild spawns `packxy _otpdialog -headline H -action A` and
+// reads the user's OTP from the child's stdout. Exit code 2 maps to
 // ErrDialogCancelled.
-func promptOTPViaChild(message string) (string, error) {
+func promptOTPViaChild(headline, action string) (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("locate self: %w", err)
@@ -68,7 +77,9 @@ func promptOTPViaChild(message string) (string, error) {
 		exe = real
 	}
 
-	cmd := exec.Command(exe, "_otpdialog", "-message", message)
+	cmd := exec.Command(exe, "_otpdialog",
+		"-headline", headline,
+		"-action", action)
 	// Inherit stderr so any cgo / AppKit error is visible in watcher.log.
 	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()
@@ -82,41 +93,47 @@ func promptOTPViaChild(message string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// PromptOTPWithReason wraps PromptOTP with a message tailored to the cause of
-// the disconnection.
+// PromptOTPWithReason wraps PromptOTP with a headline/action pair tailored
+// to the cause of the disconnection.
 func PromptOTPWithReason(reason state.Reason) (string, error) {
-	return PromptOTP(otpMessage(reason))
+	return PromptOTP(OTPHeadline(reason), otpAction(reason))
 }
 
 // OTPDropMessage returns a short user-facing line summarising why the VPN
-// dropped — suitable for a notification body.
+// dropped — suitable for a notification body. Same wording as the dialog
+// headline so the two surfaces stay coherent.
 func OTPDropMessage(reason state.Reason) string {
+	return OTPHeadline(reason)
+}
+
+// OTPHeadline returns the bold "what happened" line shown at the top of
+// the OTP dialog (and as the body of the drop notification). Single
+// sentence, ends with a period — Apple's HIG style.
+func OTPHeadline(reason state.Reason) string {
 	switch reason {
 	case state.ReasonAuthExpired:
-		return "2FA token expired (likely after Mac sleep). Enter a fresh code to reconnect."
+		return "Your 2FA token has expired (typically after a Mac sleep)."
 	case state.ReasonNetworkDrop:
-		return "VPN link dropped. A fresh 2FA code is needed to reconnect."
+		return "VPN link dropped (link silent or peer reset)."
 	case state.ReasonWake:
-		return "Mac woke from sleep. Enter a fresh 2FA code to reconnect."
+		return "Mac woke from sleep — VPN tunnel was dropped."
 	case state.ReasonStartupFailure:
-		return "openfortivpn failed to start. Enter a fresh 2FA code to retry."
+		return "openfortivpn failed to start."
 	default:
-		return "VPN disconnected. Enter a fresh 2FA code to reconnect."
+		return "VPN disconnected."
 	}
 }
 
-func otpMessage(reason state.Reason) string {
+// otpAction returns the call-to-action line shown below the headline in
+// the dialog. Different drops carry slightly different verbs ("retry"
+// after a startup failure, "reconnect" otherwise) so the prompt matches
+// the situation.
+func otpAction(reason state.Reason) string {
 	switch reason {
-	case state.ReasonAuthExpired:
-		return "Your 2FA token has expired (typically after a Mac sleep).\nEnter a fresh code to reconnect:"
-	case state.ReasonNetworkDrop:
-		return "VPN link dropped (link silent or peer reset).\nEnter a fresh 2FA code:"
-	case state.ReasonWake:
-		return "Mac woke from sleep — VPN tunnel was dropped.\nEnter a fresh 2FA code to reconnect:"
 	case state.ReasonStartupFailure:
-		return "openfortivpn failed to start.\nEnter a fresh 2FA code to retry:"
+		return "Enter a fresh 2FA code to retry."
 	default:
-		return "VPN disconnected. Enter a fresh 2FA code to reconnect:"
+		return "Enter a fresh 2FA code to reconnect."
 	}
 }
 

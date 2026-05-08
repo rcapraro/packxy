@@ -54,6 +54,24 @@ The result is that the host's normal default route (typically `en0`/Wi-Fi) survi
 - For each entry in `VPN_ROUTES`, `internal/macnet` runs `sudo route add -net <CIDR> -interface ppp0`. These routes are more specific than the default route, so traffic to those CIDRs alone is sent through `ppp0`.
 - For each entry in `VPN_DOMAINS`, packxy writes `/etc/resolver/<domain>` with `nameserver <VPN_DNS>`. macOS' resolver framework consults that file only for matching queries; every other DNS lookup goes through your usual resolver. `/etc/resolv.conf` is never modified.
 
+### The menu-bar tray
+
+Once installed and started from the bundle, packxy adds a discreet status item to the macOS menu bar with a padlock template icon (locked when the tunnel is up, unlocked when down). Click it for a glanceable summary:
+
+```
+🟢  Connected
+─────────────────
+IP:     10.212.134.1
+Routes: 10.0.0.0/8
+DNS:    packsolutions.local
+─────────────────
+Last drop: wake (3m ago)   (only shown when one is recorded)
+─────────────────
+Disconnect & Quit  ⌘Q
+```
+
+The tray runs as `packxy _tray` — its own process with a continuous AppKit run loop (which the Setsid'd watcher can't host). It polls `/tmp/packxy/` every 2 s and updates the menu in place; clicking **Disconnect & Quit** spawns `packxy stop`. The tray is started automatically by `packxy start` and torn down by `packxy stop`. It is only enabled when packxy is invoked from the `.app` bundle (the bare CLI binary skips it silently).
+
 ### The watcher
 
 After `packxy start` brings the tunnel up, it spawns a detached background process — the **watcher** — that owns the runtime lifecycle of the VPN. Its job is to react to drops without you having to rerun `packxy start`.
