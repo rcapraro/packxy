@@ -267,6 +267,13 @@ func runStart() int {
 		return 1
 	}
 
+	// Cleanup before we ask the user anything — otherwise a leftover
+	// watcher from a previous `packxy start` would react to our
+	// openfortivpn kill by popping its own OTP dialog and the user
+	// would get two prompts (and probably enter the code into the
+	// wrong one).
+	silentTeardown()
+
 	ui.StepInfo("sudo is needed for routes and DNS entries.")
 	if err := macnet.SudoValidate(); err != nil {
 		ui.PrintErr("sudo authentication failed.")
@@ -286,10 +293,6 @@ func runStart() int {
 	ui.Page()
 	ui.Header()
 	ui.Section("Pipeline")
-
-	// Defensive: a previous crashed run might leave an orphan openfortivpn or
-	// stale ppp0. Best-effort cleanup before we try a fresh start.
-	cleanupOrphans()
 
 	fcfg := fortiConfig(cfg)
 
@@ -483,34 +486,60 @@ func fortiConfig(cfg *envcfg.Config) forti.Config {
 	}
 }
 
-// cleanupOrphans best-effort kills any leftover openfortivpn process from a
-// previous crashed run and tears down ppp0 if it survived. Called before
-// `forti.Start` so the next openfortivpn invocation isn't denied by /dev/ppp
-// already being in use.
-func cleanupOrphans() {
-	_ = exec.Command("sudo", "-n", "pkill", "-x", "openfortivpn").Run()
-	// Give it a moment so the kernel releases ppp0.
+// silentTeardown undoes any leftover state from a previous `packxy
+// start` that wasn't paired with `packxy stop` (or that crashed before
+// stop ran). Called at the very top of runStart, before SudoValidate,
+// before promptCredentials — so the rest of runStart starts from a
+// clean slate.
+//
+// The kill order matters:
+//
+//  1. _otpdialog: an in-flight NSAlert from the previous watcher's
+//     reconnectLoop. Killing it first lets the watcher's blocking
+//     exec.Wait return so its SIGTERM in step 2 is actually observed
+//     instead of getting stuck behind a modal.
+//  2. _watcher: kill before openfortivpn so it can't react to the VPN
+//     dying by popping its own OTP dialog at the user — the bug that
+//     made `packxy start` twice send the user into an OTP loop.
+//  3. _tray: kill before spawning the new tray so we don't end up with
+//     two padlock icons in the menu bar.
+//  4. openfortivpn: kill last so /dev/ppp is free for the new
+//     forti.Start. Routes via the old ppp0 are flushed automatically by
+//     the kernel as the interface goes down.
+func silentTeardown() {
+	killStrayDaemon("packxy _otpdialog")
+	killStrayDaemon("packxy _watcher")
+	killStrayDaemon("packxy _tray")
+	_ = exec.Command("sudo", "-n", "pkill", "-TERM", "-x", "openfortivpn").Run()
+	// Brief moment for the kernel to tear down ppp0 + flush routes.
 	time.Sleep(200 * time.Millisecond)
 }
 
-// killStrayDaemon kills any process whose command line matches `pattern`
-// — used to defensively clean up stale watcher / tray daemons from an
-// earlier `packxy start` that wasn't followed by `packxy stop`. Runs
-// without sudo because both daemons are owned by the user (only
-// openfortivpn needs privilege escalation, handled by cleanupOrphans).
+// killStrayDaemon TERMinates then (if needed) KILLs every process whose
+// command line matches `pattern`. Runs without sudo because the user-owned
+// _watcher / _otpdialog / _tray daemons don't need privilege escalation
+// (only openfortivpn does, handled separately).
 //
-// Best-effort: pkill exits 1 if there's no match, which we swallow. We
-// then briefly poll to give the OS a moment to actually reap the
-// processes before returning, so the immediately-following spawn doesn't
-// race a dying tray for the menu bar slot.
+// Polls pgrep between signals so the immediately-following spawn doesn't
+// race a still-dying daemon for resources (PID file, menu-bar slot).
 func killStrayDaemon(pattern string) {
-	_ = exec.Command("pkill", "-f", pattern).Run()
-	for i := 0; i < 10; i++ {
+	_ = exec.Command("pkill", "-TERM", "-f", pattern).Run()
+	if waitProcessGone(pattern, 20) {
+		return
+	}
+	_ = exec.Command("pkill", "-KILL", "-f", pattern).Run()
+	_ = waitProcessGone(pattern, 10)
+}
+
+func waitProcessGone(pattern string, polls int) bool {
+	for i := 0; i < polls; i++ {
+		// pgrep exit code 1 = no match left = success.
 		if exec.Command("pgrep", "-f", pattern).Run() != nil {
-			return // pgrep exit 1 = no match left
+			return true
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+	return false
 }
 
 // spawnWatcher re-execs ourselves as `packxy _watcher` in a new session so the
@@ -525,11 +554,6 @@ func killStrayDaemon(pattern string) {
 // `[NSBundle mainBundle]` to misidentify the process — notifications
 // would silently fall back to osascript with the script-runner icon.
 func spawnWatcher(workdir string) error {
-	// Defensive: a `packxy start` re-run without an intervening stop would
-	// otherwise overwrite the watcher PID file and leave the prior watcher
-	// orphaned — still polling, still wired to IOKit, never reaped.
-	killStrayDaemon("packxy _watcher")
-
 	exe, err := os.Executable()
 	if err != nil {
 		return err
@@ -1105,13 +1129,10 @@ func runTray(args []string) int {
 // Unlike the watcher, the tray needs to interact with WindowServer, so
 // we don't Setsid — we want to inherit the user's Aqua session. Stdout
 // and stderr go to the tray log.
+//
+// Any prior tray has already been reaped by silentTeardown at the top
+// of runStart — no defensive kill needed here.
 func spawnTray() error {
-	// Defensive: clear any orphan tray from a prior `packxy start` that
-	// wasn't paired with `packxy stop`. Without this we'd end up with two
-	// padlock icons in the menu bar, the older one driven by a process
-	// whose PID file we already overwrote and can no longer signal.
-	killStrayDaemon("packxy _tray")
-
 	exe, err := os.Executable()
 	if err != nil {
 		return err
