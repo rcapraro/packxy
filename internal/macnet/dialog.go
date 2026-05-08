@@ -21,19 +21,21 @@ var ErrDialogCancelled = errors.New("dialog cancelled")
 // The OTP is shown in cleartext: it's a 30-second token, hiding it only
 // hides typos.
 //
-// When packxy runs inside its .app bundle (post-`packxy install`), the
-// dialog is rendered by `cocoaPromptOTP` — a native NSAlert with text
-// input, attributed to our bundle (proper icon, no AppleScript artifacts
-// in the menu bar). When running the bare CLI outside the bundle, falls
-// back to `osascript display dialog`, which works but shows the
-// AppleScript script-runner icon.
+// Two backends:
+//
+//   - When running inside the .app bundle (post-`packxy install`),
+//     PromptOTP forks a short-lived child — `packxy _otpdialog` — that
+//     calls NSAlert via cgo + AppKit. The child runs without Setsid in a
+//     clean process, which is what NSAlert.runModal needs to come up
+//     reliably. The child returns the OTP via stdout, exit 0 on OK, exit
+//     2 on cancel.
+//   - Running the bare CLI binary outside any bundle, falls back to
+//     `osascript display dialog`. Works but shows the AppleScript
+//     script-runner icon and momentarily places a script entry in the
+//     menu bar.
 func PromptOTP(message string) (string, error) {
 	if runningInsideBundle() {
-		out, cancelled := cocoaPromptOTP("packxy", message)
-		if cancelled {
-			return "", ErrDialogCancelled
-		}
-		return strings.TrimSpace(out), nil
+		return promptOTPViaChild(message)
 	}
 
 	script := `tell me to activate
@@ -50,6 +52,32 @@ return text returned of d`
 			return "", ErrDialogCancelled
 		}
 		return "", fmt.Errorf("osascript: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// promptOTPViaChild spawns `packxy _otpdialog -message <msg>` and reads
+// the user's OTP from the child's stdout. Exit code 2 maps to
+// ErrDialogCancelled.
+func promptOTPViaChild(message string) (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("locate self: %w", err)
+	}
+	if real, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = real
+	}
+
+	cmd := exec.Command(exe, "_otpdialog", "-message", message)
+	// Inherit stderr so any cgo / AppKit error is visible in watcher.log.
+	cmd.Stderr = os.Stderr
+	out, err := cmd.Output()
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && ee.ExitCode() == 2 {
+			return "", ErrDialogCancelled
+		}
+		return "", fmt.Errorf("_otpdialog: %w", err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }

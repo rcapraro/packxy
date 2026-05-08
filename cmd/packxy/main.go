@@ -57,6 +57,8 @@ func main() {
 		os.Exit(runUninstall())
 	case "_watcher":
 		os.Exit(runWatcher(os.Args[2:]))
+	case "_otpdialog":
+		os.Exit(runOTPDialog(os.Args[2:]))
 	case "-h", "--help", "help":
 		usage()
 		os.Exit(0)
@@ -991,6 +993,40 @@ func infraBackoff(n int) time.Duration {
 	default:
 		return 60 * time.Second
 	}
+}
+
+// =====================================================================
+//  _otpdialog (internal, child of the watcher)
+// =====================================================================
+
+// runOTPDialog is invoked by the watcher as `packxy _otpdialog -message
+// <msg>` whenever it needs a fresh OTP. Running the dialog in a separate
+// short-lived process — instead of straight from the Setsid'd watcher —
+// gives Cocoa's NSAlert a clean process to bootstrap into, which is what
+// allows the modal window to actually appear on screen.
+//
+// Output contract:
+//
+//	exit 0  : OTP printed to stdout (one line, no trailing newline beyond
+//	          fmt.Println's)
+//	exit 2  : user clicked Cancel
+//	exit 1  : internal error (also written to stderr)
+func runOTPDialog(args []string) int {
+	fs := flag.NewFlagSet("_otpdialog", flag.ExitOnError)
+	message := fs.String("message", "", "dialog message")
+	_ = fs.Parse(args)
+
+	if *message == "" {
+		fmt.Fprintln(os.Stderr, "_otpdialog: -message is required")
+		return 1
+	}
+
+	out, cancelled := macnet.CocoaPromptOTP("packxy", *message)
+	if cancelled {
+		return 2
+	}
+	fmt.Println(strings.TrimSpace(out))
+	return 0
 }
 
 // =====================================================================

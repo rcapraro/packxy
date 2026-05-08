@@ -36,12 +36,13 @@ package macnet
 // Caller (Go) is responsible for freeing the returned char* via free().
 static char* packxy_prompt_otp(const char* title, const char* message, int* out_cancelled) {
     @autoreleasepool {
-        // sharedApplication is idempotent; LSUIElement=true in Info.plist
-        // gives us NSApplicationActivationPolicyAccessory by default, but
-        // setting it explicitly makes the call safe even if Info.plist
-        // is missing.
+        // Bootstrap NSApp. finishLaunching is what most "headless" Cocoa
+        // tools forget — without it some plumbing (CGS connections,
+        // services menu, default activation) stays half-initialised and
+        // runModal can block silently waiting for events that never come.
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+        [NSApp finishLaunching];
         [NSApp activateIgnoringOtherApps:YES];
 
         NSAlert* alert = [[NSAlert alloc] init];
@@ -58,9 +59,12 @@ static char* packxy_prompt_otp(const char* title, const char* message, int* out_
         [input setBezeled:YES];
         alert.accessoryView = input;
 
-        // Pin the dialog above other windows so a Setsid'd daemon doesn't
-        // get its modal stuck behind everything.
+        // Pin the dialog above other windows + bring it on screen now so
+        // we don't depend on activation propagating through the run loop.
         [alert.window setLevel:NSStatusWindowLevel];
+        [alert.window center];
+        [alert.window makeKeyAndOrderFront:nil];
+        [alert.window orderFrontRegardless];
         [alert.window setInitialFirstResponder:input];
         [alert.window makeFirstResponder:input];
 
@@ -85,11 +89,17 @@ import (
 	"unsafe"
 )
 
-// cocoaPromptOTP displays a native NSAlert with a text input and returns
+// CocoaPromptOTP displays a native NSAlert with a text input and returns
 // the user's entry, or ("", true) on cancel. Must be invoked from a
 // process running inside the .app bundle for the dialog to be attributed
-// correctly — `runningInsideBundle` gates this.
-func cocoaPromptOTP(title, message string) (string, bool) {
+// correctly.
+//
+// Exported (and intended to run in its own short-lived process) because
+// the watcher daemon — being Setsid'd and lacking a Cocoa run loop —
+// can't reliably bring up an NSAlert directly. The watcher therefore
+// spawns `packxy _otpdialog` as a child; that child invokes this
+// function once and exits, giving Cocoa a clean process to work with.
+func CocoaPromptOTP(title, message string) (string, bool) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
