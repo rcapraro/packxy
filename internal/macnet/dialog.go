@@ -103,18 +103,22 @@ func PromptOTPWithReason(reason state.Reason) (string, error) {
 // top of the OTP dialog (as NSAlert.messageText) and as the body of the
 // drop notification, so the two surfaces stay coherent. Single sentence
 // ending with a period, per Apple's HIG.
+//
+// Wording stays at the user's level of abstraction: no "pppd", no
+// "openfortivpn", no "peer reset / link silent". Internal diagnostics
+// belong in the watcher log, not in the OTP popup.
 func OTPHeadline(reason state.Reason) string {
 	switch reason {
 	case state.ReasonAuthExpired:
-		return "Your 2FA token has expired (typically after a Mac sleep)."
+		return "Your 2FA token has expired."
 	case state.ReasonNetworkDrop:
-		return "VPN link dropped (link silent or peer reset)."
+		return "The VPN connection dropped."
 	case state.ReasonWake:
-		return "Mac woke from sleep — VPN tunnel was dropped."
+		return "Mac woke from sleep — the VPN tunnel was dropped."
 	case state.ReasonStartupFailure:
-		return "openfortivpn failed to start."
+		return "The VPN failed to start."
 	default:
-		return "VPN disconnected."
+		return "The VPN disconnected."
 	}
 }
 
