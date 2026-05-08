@@ -187,18 +187,18 @@ See [Configuration reference](#configuration-reference) for all options.
 ### 3. Connect
 
 ```bash
-./packxy start
+packxy start
 ```
 
-Packxy will show your saved values and prompt for confirmation. You will always be asked for a fresh **OTP code**.
+`packxy start` reads `.env`, displays whatever it found in a "From .env:" reminder card (so you don't retype it), and only prompts for fields that are missing — plus the **OTP code**, which is always asked for fresh (single-use). On success it brings up `ppp0`, adds the routes, writes the resolvers, arms the watcher, and (from the `.app` bundle) shows the menu-bar tray.
 
 ### 4. Disconnect
 
 ```bash
-./packxy stop
+packxy stop
 ```
 
-This stops `openfortivpn`, removes the routes, and removes the `/etc/resolver/` entries.
+This kills the menu-bar tray, the watcher, and `openfortivpn`, and removes the `/etc/resolver/` entries. Routes pointing at `ppp0` are flushed automatically by the kernel when the interface goes down.
 
 ## Configuration reference
 
@@ -302,38 +302,48 @@ The drop itself is unavoidable: when macOS sleeps, every userland process (inclu
 
 If you dismiss the OTP dialog, routes and resolvers are torn down cleanly — run `./packxy start` again when you want to reconnect. Watcher state and logs: `cat /tmp/packxy/watcher.log`. Inspect last drop with `./packxy status`.
 
-### Routes/DNS not removed after stop
+### `/etc/resolver/<domain>` left after stop
 
-`packxy stop` uses your cached sudo credential (validated at start). After several hours that cache has expired, and route removal can fail silently. Run `sudo -v` then `packxy stop` again, or remove the entries manually:
+Removing the resolver entries needs sudo privilege that isn't in the
+sudoers drop-in (only `openfortivpn`, `pkill -x openfortivpn`, and
+`route` are passwordless). `packxy stop` falls back to the cached sudo
+credential, which expires ~5 min after `packxy start`. If you stop the
+session hours later the resolver files may stay behind. Either run
+`sudo -v` first, or remove them by hand:
 
 ```bash
-sudo route -q delete -net 10.0.0.0/8
 sudo rm /etc/resolver/packsolutions.local
 ```
+
+Routes via `ppp0` are flushed automatically by the kernel when the
+interface goes down — no manual cleanup needed there.
 
 ## Project files
 
 | File | Purpose |
 |---|---|
-| `cmd/packxy/main.go` | CLI entry — `install` / `start` / `stop` / `status` / `_watcher` |
+| `cmd/packxy/main.go` | CLI entry — user-facing `install` / `start` / `stop` / `status` plus the internal `_watcher` / `_otpdialog` / `_tray` re-exec subcommands |
 | `cmd/genicon/main.go` | Build-time tool: paints `assets/icon.png` (1024×1024 padlock) |
 | `internal/forti/` | Native openfortivpn driver, install/uninstall, default-route capture/restore |
-| `internal/macnet/` | macOS networking helpers (routes, DNS, sudo, OTP dialog) |
-| `internal/macnet/sleepwake.go` | IOKit cgo bridge — `IORegisterForSystemPower` → Go channel |
+| `internal/macnet/macnet.go` | Plain-Go shell helpers: routes, DNS resolvers, `IfaceIPv4`, sudo validation |
+| `internal/macnet/dialog.go` | `Notify` + `PromptOTP` (cgo path inside .app, osascript fallback) |
+| `internal/macnet/dialog_native.go` | NSAlert via cgo + AppKit (used by `packxy _otpdialog`) |
 | `internal/macnet/notification.go` | NSUserNotification cgo bridge for bundle-iconed notifications |
-| `internal/ui/` | Terminal UI (huh prompts + lipgloss styling) |
+| `internal/macnet/sleepwake.go` | IOKit cgo bridge — `IORegisterForSystemPower` → Go channel |
+| `internal/macnet/tray.go` + `tray_objc.m` | NSStatusItem menu-bar indicator (Go bindings + Objective-C impl) |
+| `internal/ui/` | Terminal UI (huh prompts, lipgloss styling, `HumanizeAge` formatter) |
 | `internal/envcfg/` | `.env` loading |
-| `internal/state/` | `/tmp/packxy` state (PIDs, routes, domains, last drop) |
+| `internal/state/` | `/tmp/packxy` state (PID files, routes, domains, last drop) |
 | `resources/Info.plist` | `.app` bundle metadata template (CFBundleIdentifier, LSUIElement) |
 | `assets/icon.png` | Source artwork for `AppIcon.icns` (regenerate with `make icon`) |
-| `Makefile` | `build`, `app`, `app-universal`, `icon`, `universal`, `clean` |
+| `Makefile` | `build`, `app`, `app-universal`, `icon`, `clean` |
 | `.env` | Your VPN credentials and routing config (git-ignored) |
 | `.env.sample` | Template for `.env` |
 
 ## Security notes
 
-- The sudoers drop-in (`/etc/sudoers.d/packxy`) grants exactly two passwordless commands: `/opt/homebrew/bin/openfortivpn` (any args, since openfortivpn itself is the only thing it can launch as root) and `/usr/bin/pkill` restricted to the `-x openfortivpn` target. Inspect with `cat /etc/sudoers.d/packxy`.
-- The `.app` bundle is ad-hoc-signed (`codesign --sign -`), enough for local trust on the machine that built or downloaded it. There is no Developer ID / notarization — first-run warnings on a fresh download are expected. Right-click → Open or `xattr -dr com.apple.quarantine packxy.app` to clear them.
+- The sudoers drop-in (`/etc/sudoers.d/packxy`) grants exactly three passwordless commands: `openfortivpn` (any args, since openfortivpn itself is the only thing the rule can launch as root), `pkill` narrowly scoped to the `-x openfortivpn` target, and `route` (needed to restore the host's default route after pppd hijacks it, and to re-add VPN routes after each reconnect). Inspect with `cat /etc/sudoers.d/packxy`.
+- The `.app` bundle is ad-hoc-signed (`codesign --sign -`), enough for local trust on the machine that built or downloaded it. There is no Developer ID / notarization — first-run Gatekeeper warnings on a fresh download are expected. Right-click → Open, or run `xattr -dr com.apple.quarantine packxy.app`, to clear them.
 - Do not commit `.env` — it contains your VPN password.
 - OTP codes are single-use; do not store them in `.env`.
 

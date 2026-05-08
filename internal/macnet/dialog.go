@@ -99,16 +99,10 @@ func PromptOTPWithReason(reason state.Reason) (string, error) {
 	return PromptOTP(OTPHeadline(reason), otpAction(reason))
 }
 
-// OTPDropMessage returns a short user-facing line summarising why the VPN
-// dropped — suitable for a notification body. Same wording as the dialog
-// headline so the two surfaces stay coherent.
-func OTPDropMessage(reason state.Reason) string {
-	return OTPHeadline(reason)
-}
-
-// OTPHeadline returns the bold "what happened" line shown at the top of
-// the OTP dialog (and as the body of the drop notification). Single
-// sentence, ends with a period — Apple's HIG style.
+// OTPHeadline returns the bold "what happened" line — used both at the
+// top of the OTP dialog (as NSAlert.messageText) and as the body of the
+// drop notification, so the two surfaces stay coherent. Single sentence
+// ending with a period, per Apple's HIG.
 func OTPHeadline(reason state.Reason) string {
 	switch reason {
 	case state.ReasonAuthExpired:

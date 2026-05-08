@@ -1,26 +1,24 @@
 // Package forti is the native macOS driver for openfortivpn.
 //
-// Lifecycle:
+// Lifecycle: Start writes a split-tunnel-safe config, spawns openfortivpn,
+// waits for ppp0 to come up, and returns the new Process. After that the
+// caller (the watcher in cmd/packxy) owns the process by PID — it monitors
+// liveness via state.ProcessAlive and tears the VPN down with `pkill -x
+// openfortivpn` (allowed without password by the sudoers drop-in). The
+// forti package never tracks the live *exec.Cmd beyond Start's error
+// cleanup.
 //
-//	Start  → writes split-tunnel-safe config, launches openfortivpn,
-//	         waits for ppp0 to come up.
-//	Wait   → blocks until openfortivpn exits, returns a classified Reason.
-//	Stop   → SIGTERM with timeout, then SIGKILL.
+// Split tunneling is preserved by four layered controls (see README):
+// openfortivpn's set-routes=0 / set-dns=0, pppd's nodefaultroute, an
+// after-the-fact restore of the host default route, and explicit `route
+// add` calls from internal/macnet for the configured CIDRs.
 //
-// Split tunneling is preserved: openfortivpn is configured with set-routes=0
-// and set-dns=0; pppd is configured (via /etc/ppp/peers/packxy) with
-// nodefaultroute. Callers (internal/macnet) add macOS routes and
-// /etc/resolver entries explicitly for the CIDRs/domains in .env, leaving the
-// host default route and /etc/resolv.conf untouched.
-//
-// Privileges: openfortivpn requires root on macOS to open /dev/ppp and create
-// ppp0. Start invokes it via `sudo -n openfortivpn ...`, which is expected to
-// be password-free thanks to the sudoers drop-in installed by `packxy install`.
-// When already running as root, sudo is skipped.
+// Privileges: openfortivpn requires root on macOS to open /dev/ppp.
+// Start invokes it via `sudo -n openfortivpn ...`, password-free thanks
+// to the sudoers drop-in installed by `packxy install`.
 package forti
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -31,9 +29,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
 	"time"
 
+	"github.com/rcapraro/packxy/internal/macnet"
 	"github.com/rcapraro/packxy/internal/state"
 )
 
@@ -60,13 +58,17 @@ var authErrorRE = regexp.MustCompile(
 	`(?i)Could not authenticate to gateway|check the password, client certificate|Authentication failed|Invalid (password|OTP)|OTP required|Permission denied`,
 )
 
-// errPattern is the user-facing error pattern used by ExtractError to surface
-// a meaningful message when a connection attempt fails.
-var errPattern = regexp.MustCompile(
+// userErrorRE is the user-facing error pattern used by ExtractError to
+// surface a meaningful message when an initial connection attempt fails.
+// Wider than authErrorRE so we catch certificate / gateway problems too.
+var userErrorRE = regexp.MustCompile(
 	`(?i)Could not authenticate to gateway|Authentication failed|Invalid OTP|OTP required|Connection failed|check the password, client certificate|Invalid password|Certificate error|Gateway unreachable`,
 )
 
-var fatalPat = regexp.MustCompile(`(?i)ERROR:|error:|fatal`)
+// genericFatalRE catches the bare "ERROR:" / "fatal" lines openfortivpn
+// emits when none of the curated patterns match — used as a last-resort
+// fallback in ExtractError.
+var genericFatalRE = regexp.MustCompile(`(?i)ERROR:|error:|fatal`)
 
 // Config describes one openfortivpn invocation.
 type Config struct {
@@ -77,6 +79,7 @@ type Config struct {
 	OTP         string
 	Realm       string
 	TrustedCert string
+	OTPPrompt   string // optional substring to detect the OTP prompt
 	NoFTMPush   bool
 
 	LCPEchoInterval int // 0 → DefaultLCPEchoInterval
@@ -85,23 +88,14 @@ type Config struct {
 	StateDir string // defaults to state.Dir
 }
 
-// Process represents a running openfortivpn subprocess.
+// Process is the minimal handle Start hands back to the caller. After
+// Start returns, the live *exec.Cmd is no longer tracked — the watcher
+// monitors liveness by PID polling and stops the VPN with `pkill -x
+// openfortivpn`. No Wait/Stop methods exist on this type for that reason.
 type Process struct {
-	PID   int    // PID of openfortivpn (or sudo wrapper if not root)
-	Iface string // "ppp0"
-	IP    string // VPN-assigned IP, populated once ppp0 is up
-
-	cmd     *exec.Cmd
-	logPath string
-	cfgPath string
-	started time.Time
+	PID int    // PID of openfortivpn (or its sudo wrapper, which execs into it)
+	IP  string // VPN-assigned IP on ppp0, populated once the link is up
 }
-
-// LogPath returns the path of the openfortivpn log file for this process.
-func (p *Process) LogPath() string { return p.logPath }
-
-// Started returns the moment Start was invoked, used to scope log scans.
-func (p *Process) Started() time.Time { return p.started }
 
 // Start writes the config files and launches openfortivpn. Returns when ppp0
 // is up with an IP, or with an error if openfortivpn fails to authenticate or
@@ -165,31 +159,26 @@ func Start(ctx context.Context, cfg Config) (*Process, error) {
 	}
 	_ = logF.Close()
 
-	p := &Process{
-		PID:     cmd.Process.Pid,
-		Iface:   Iface,
-		cmd:     cmd,
-		logPath: logPath,
-		cfgPath: cfgPath,
-		started: time.Now(),
-	}
-
-	ip, err := waitForInterface(ctx, p, 40*time.Second)
+	pid := cmd.Process.Pid
+	ip, err := waitForInterface(ctx, pid, logPath, 40*time.Second)
 	if err != nil {
-		_ = stopCmd(cmd, 3*time.Second)
+		// Best-effort cleanup: signal the failed openfortivpn so we don't
+		// leave it running with a half-configured ppp0. We can use sudo's
+		// kill (cache is fresh — Start was just called from runStart) or
+		// pkill via the sudoers drop-in.
+		_ = exec.Command("sudo", "-n", "pkill", "-TERM", "-x", "openfortivpn").Run()
 		return nil, err
 	}
-	p.IP = ip
 
-	// macOS workaround: despite `nodefaultroute`, the SystemConfiguration
-	// framework installs a default route via ppp0 when the interface comes
-	// up, replacing the host's normal default. Restore the original default
+	// macOS workaround: despite `nodefaultroute`, SystemConfiguration
+	// installs a default route via ppp0 when the interface comes up,
+	// replacing the host's normal default. Restore the original default
 	// so only the explicit VPN_ROUTES (added later by macnet.AddRoute)
-	// reach ppp0. Best-effort: failure leaves full-tunnel mode but the VPN
-	// itself is up.
+	// reach ppp0. Best-effort: failure leaves full-tunnel mode but the
+	// VPN itself is up.
 	restoreDefaultIfHijacked(origDefault)
 
-	return p, nil
+	return &Process{PID: pid, IP: ip}, nil
 }
 
 // defaultRouteInfo captures the gateway + interface of the active IPv4
@@ -249,71 +238,9 @@ func restoreDefaultIfHijacked(orig defaultRouteInfo) {
 	}
 }
 
-// Wait blocks until the openfortivpn process exits and returns a classified
-// Reason. Returns context.Canceled / DeadlineExceeded if the wait is interrupted.
-func Wait(ctx context.Context, p *Process) (state.Reason, error) {
-	if p == nil || p.cmd == nil {
-		return state.ReasonUnknown, errors.New("nil process")
-	}
-
-	done := make(chan error, 1)
-	go func() { done <- p.cmd.Wait() }()
-
-	select {
-	case <-ctx.Done():
-		return state.ReasonUnknown, ctx.Err()
-	case err := <-done:
-		return Classify(err, p.logPath), nil
-	}
-}
-
-// Stop sends SIGTERM, waits up to 3s, then SIGKILL. Idempotent.
-func Stop(p *Process) error {
-	if p == nil || p.cmd == nil || p.cmd.Process == nil {
-		return nil
-	}
-	return stopCmd(p.cmd, 3*time.Second)
-}
-
-// Status returns "running" if the process is alive and ppp0 has an IP, or a
-// terse status string otherwise.
-func Status(p *Process) (string, string) {
-	if p == nil || p.cmd == nil || p.cmd.Process == nil {
-		return "absent", ""
-	}
-	if !state.ProcessAlive(p.PID) {
-		return "exited", ""
-	}
-	ip, err := readPPP0IP()
-	if err != nil || ip == "" {
-		return "running", ""
-	}
-	return "running", ip
-}
-
-// Classify maps a process exit error + log content to a Reason.
-//
-//   - log contains an auth-class error  → ReasonAuthExpired
-//   - process exited normally with code 0 → ReasonUnknown (clean exit)
-//   - process exited with non-zero code   → ReasonNetworkDrop
-//   - process killed by signal            → ReasonNetworkDrop
-func Classify(err error, logPath string) state.Reason {
-	if logsContainAuthError(logPath) {
-		return state.ReasonAuthExpired
-	}
-	if err == nil {
-		return state.ReasonUnknown
-	}
-	var ee *exec.ExitError
-	if errors.As(err, &ee) {
-		return state.ReasonNetworkDrop
-	}
-	return state.ReasonNetworkDrop
-}
-
-// ClassifyFromLog returns a Reason based purely on log file content. Used by
-// the watcher when it doesn't have a process-exit error to inspect (it polls
-// the openfortivpn PID rather than waiting on it directly).
+// ClassifyFromLog returns a Reason based purely on log file content.
+// The watcher polls the openfortivpn PID and reads the log file when the
+// process disappears, so it never has an *exec.Cmd error to inspect.
 func ClassifyFromLog(logPath string) state.Reason {
 	if logsContainAuthError(logPath) {
 		return state.ReasonAuthExpired
@@ -322,25 +249,17 @@ func ClassifyFromLog(logPath string) state.Reason {
 }
 
 // ExtractError returns up to 3 lines from the log that look like errors,
-// suitable for surfacing to the user.
+// suitable for surfacing to the user when an initial connection attempt
+// fails. Falls back to a generic message if nothing matches.
 func ExtractError(logPath string) string {
 	b, err := os.ReadFile(logPath)
 	if err != nil {
 		return "Could not read openfortivpn log."
 	}
 	lines := strings.Split(string(b), "\n")
-	var matches []string
-	for _, l := range lines {
-		if errPattern.MatchString(l) {
-			matches = append(matches, l)
-		}
-	}
+	matches := pickMatching(lines, userErrorRE)
 	if len(matches) == 0 {
-		for _, l := range lines {
-			if fatalPat.MatchString(l) {
-				matches = append(matches, l)
-			}
-		}
+		matches = pickMatching(lines, genericFatalRE)
 	}
 	if len(matches) == 0 {
 		return "Connection timed out or failed without a specific error."
@@ -349,6 +268,16 @@ func ExtractError(logPath string) string {
 		matches = matches[len(matches)-3:]
 	}
 	return strings.Join(matches, "\n")
+}
+
+func pickMatching(lines []string, re *regexp.Regexp) []string {
+	var out []string
+	for _, l := range lines {
+		if re.MatchString(l) {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 // CleanupPeerFile removes the /etc/ppp/peers/packxy file. Called by
@@ -507,6 +436,9 @@ func writeOpenfortivpnConfig(path string, cfg Config) error {
 	if cfg.OTP != "" {
 		fmt.Fprintf(&b, "otp = %s\n", cfg.OTP)
 	}
+	if cfg.OTPPrompt != "" {
+		fmt.Fprintf(&b, "otp-prompt = %s\n", cfg.OTPPrompt)
+	}
 	return os.WriteFile(path, []byte(b.String()), 0o600)
 }
 
@@ -573,52 +505,27 @@ lcp-echo-failure %d
 //  process and interface helpers
 // =====================================================================
 
-// waitForInterface polls for ppp0 to appear with an IP. Aborts early if the
-// process has died or an auth-class error appears in the log (avoids burning
-// the full timeout on a doomed connection).
-func waitForInterface(ctx context.Context, p *Process, timeout time.Duration) (string, error) {
+// waitForInterface polls for ppp0 to appear with an IP. Aborts early if
+// the openfortivpn process has died or an auth-class error appears in the
+// log — avoids burning the full timeout on a doomed connection.
+func waitForInterface(ctx context.Context, pid int, logPath string, timeout time.Duration) (string, error) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
-		if !state.ProcessAlive(p.PID) {
+		if !state.ProcessAlive(pid) {
 			return "", errors.New("openfortivpn exited before ppp0 came up")
 		}
-		if logsContainAuthError(p.logPath) {
+		if logsContainAuthError(logPath) {
 			return "", errors.New("authentication error in openfortivpn log")
 		}
-		ip, err := readPPP0IP()
-		if err == nil && ip != "" {
+		if ip := macnet.IfaceIPv4(Iface); ip != "" {
 			return ip, nil
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 	return "", fmt.Errorf("timed out waiting for %s", Iface)
-}
-
-// readPPP0IP returns the IPv4 address assigned to ppp0, or "" if the interface
-// doesn't exist yet or has no IP.
-func readPPP0IP() (string, error) {
-	out, err := exec.Command("ifconfig", Iface).Output()
-	if err != nil {
-		// "no such interface" is expected before ppp0 comes up.
-		return "", nil
-	}
-	scanner := bufio.NewScanner(bytes.NewReader(out))
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if !strings.HasPrefix(line, "inet ") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		// "inet 10.212.134.220 --> 10.212.134.1 ..."
-		return fields[1], nil
-	}
-	return "", nil
 }
 
 func logsContainAuthError(logPath string) bool {
@@ -627,40 +534,4 @@ func logsContainAuthError(logPath string) bool {
 		return false
 	}
 	return authErrorRE.Match(b)
-}
-
-// stopCmd sends SIGTERM, waits up to timeout for the process to exit, then
-// sends SIGKILL. Returns nil if the process is gone, an error otherwise.
-//
-// When openfortivpn was launched via `sudo`, signals sent to the sudo wrapper
-// are forwarded to the openfortivpn child. When packxy is already root, the
-// signal goes straight to openfortivpn.
-func stopCmd(cmd *exec.Cmd, timeout time.Duration) error {
-	if cmd == nil || cmd.Process == nil {
-		return nil
-	}
-	pid := cmd.Process.Pid
-
-	// SIGTERM via the appropriate authority. As user, the sudo wrapper is owned
-	// by root, so we need sudo to signal it.
-	if os.Geteuid() == 0 {
-		_ = cmd.Process.Signal(syscall.SIGTERM)
-	} else {
-		_ = exec.Command("sudo", "-n", "kill", "-TERM", fmt.Sprint(pid)).Run()
-	}
-
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if !state.ProcessAlive(pid) {
-			return nil
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	if os.Geteuid() == 0 {
-		_ = cmd.Process.Kill()
-	} else {
-		_ = exec.Command("sudo", "-n", "kill", "-KILL", fmt.Sprint(pid)).Run()
-	}
-	return nil
 }

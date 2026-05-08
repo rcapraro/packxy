@@ -26,18 +26,55 @@ const (
 // TrayLogPath is the absolute path of the tray's log file.
 func TrayLogPath() string { return filepath.Join(Dir, trayLogFile) }
 
-// WriteTrayPID stores the menu-bar tray daemon's PID so `packxy stop` can
-// signal it.
-func WriteTrayPID(pid int) error {
+// WatcherLogPath is the absolute path of the watcher's log file.
+func WatcherLogPath() string { return filepath.Join(Dir, watcherLogFile) }
+
+// WriteWatcherPID / ReadWatcherPID / ClearWatcherPID — see writePIDFile,
+// readPIDFile, and the comment on ClearWatcherPID below.
+func WriteWatcherPID(pid int) error { return writePIDFile(watcherPIDFile, pid) }
+func WriteVPNPID(pid int) error     { return writePIDFile(vpnPIDFile, pid) }
+func WriteTrayPID(pid int) error    { return writePIDFile(trayPIDFile, pid) }
+
+func ReadWatcherPID() (int, error) { return readPIDFile(watcherPIDFile) }
+func ReadVPNPID() (int, error)     { return readPIDFile(vpnPIDFile) }
+func ReadTrayPID() (int, error)    { return readPIDFile(trayPIDFile) }
+
+// ClearVPNPID and ClearTrayPID unconditionally remove their PID file.
+// They're called from the spawning side after a teardown is initiated.
+func ClearVPNPID()  { _ = os.Remove(filepath.Join(Dir, vpnPIDFile)) }
+func ClearTrayPID() { _ = os.Remove(filepath.Join(Dir, trayPIDFile)) }
+
+// ClearWatcherPID removes the watcher PID file only if it still records
+// the given pid. This avoids a race where the defer of an exiting watcher
+// would erase the PID of a freshly spawned successor (we re-write the PID
+// from runStart before the old one's defer fires).
+func ClearWatcherPID(pid int) {
+	path := filepath.Join(Dir, watcherPIDFile)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	current, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || current != pid {
+		return
+	}
+	_ = os.Remove(path)
+}
+
+// writePIDFile creates Dir if needed and writes the PID as ASCII decimal.
+func writePIDFile(name string, pid int) error {
 	if err := Ensure(); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(Dir, trayPIDFile), []byte(strconv.Itoa(pid)), 0o644)
+	return os.WriteFile(filepath.Join(Dir, name), []byte(strconv.Itoa(pid)), 0o644)
 }
 
-// ReadTrayPID returns the tray daemon's PID, or 0 if absent / dead.
-func ReadTrayPID() (int, error) {
-	path := filepath.Join(Dir, trayPIDFile)
+// readPIDFile reads a PID file and validates that the recorded PID still
+// corresponds to a live process. Stale entries (process gone, malformed
+// content, non-positive PID) are removed so subsequent reads see a clean
+// slate. Returns (0, nil) when the file is absent.
+func readPIDFile(name string) (int, error) {
+	path := filepath.Join(Dir, name)
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -57,68 +94,10 @@ func ReadTrayPID() (int, error) {
 	return pid, nil
 }
 
-// ClearTrayPID removes the tray PID file.
-func ClearTrayPID() {
-	_ = os.Remove(filepath.Join(Dir, trayPIDFile))
-}
-
-// WatcherLogPath is the absolute path of the watcher's log file.
-func WatcherLogPath() string { return filepath.Join(Dir, watcherLogFile) }
-
-// WriteWatcherPID stores the watcher daemon's PID.
-func WriteWatcherPID(pid int) error {
-	if err := Ensure(); err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(Dir, watcherPIDFile), []byte(strconv.Itoa(pid)), 0o644)
-}
-
-// ClearWatcherPID removes the watcher PID file only if it still records the
-// given pid. This avoids a race where the defer of an exiting watcher would
-// erase the PID of a freshly spawned successor.
-func ClearWatcherPID(pid int) {
-	path := filepath.Join(Dir, watcherPIDFile)
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return
-	}
-	current, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil || current != pid {
-		return
-	}
-	_ = os.Remove(path)
-}
-
-// ReadWatcherPID returns the watcher PID, or 0 if no watcher is registered or
-// the recorded PID no longer corresponds to a live process. In the latter case
-// the stale PID file is removed so subsequent reads see a clean slate.
-func ReadWatcherPID() (int, error) {
-	path := filepath.Join(Dir, watcherPIDFile)
-	b, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil
-		}
-		return 0, err
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil {
-		return 0, err
-	}
-	if pid <= 0 {
-		_ = os.Remove(path)
-		return 0, nil
-	}
-	if !ProcessAlive(pid) {
-		_ = os.Remove(path)
-		return 0, nil
-	}
-	return pid, nil
-}
-
-// ProcessAlive reports whether a process with the given pid currently exists.
-// EPERM (process exists but is owned by another user) counts as alive; only
-// ESRCH means the process is gone.
+// ProcessAlive reports whether a process with the given pid currently
+// exists. EPERM (process exists but is owned by another user — e.g. the
+// root-owned openfortivpn child of sudo) counts as alive; only ESRCH
+// means the process is gone.
 func ProcessAlive(pid int) bool {
 	if pid <= 0 {
 		return false
@@ -132,45 +111,6 @@ func ProcessAlive(pid int) bool {
 
 func Ensure() error {
 	return os.MkdirAll(Dir, 0o755)
-}
-
-// WriteVPNPID stores the openfortivpn process's PID. The watcher writes it so
-// `packxy stop` and `packxy status` can locate the live VPN process.
-func WriteVPNPID(pid int) error {
-	if err := Ensure(); err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(Dir, vpnPIDFile), []byte(strconv.Itoa(pid)), 0o644)
-}
-
-// ReadVPNPID returns the openfortivpn PID, or 0 if no PID is recorded or the
-// recorded PID no longer exists.
-func ReadVPNPID() (int, error) {
-	b, err := os.ReadFile(filepath.Join(Dir, vpnPIDFile))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil
-		}
-		return 0, err
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil {
-		return 0, err
-	}
-	if pid <= 0 {
-		_ = os.Remove(filepath.Join(Dir, vpnPIDFile))
-		return 0, nil
-	}
-	if !ProcessAlive(pid) {
-		_ = os.Remove(filepath.Join(Dir, vpnPIDFile))
-		return 0, nil
-	}
-	return pid, nil
-}
-
-// ClearVPNPID removes the openfortivpn PID file.
-func ClearVPNPID() {
-	_ = os.Remove(filepath.Join(Dir, vpnPIDFile))
 }
 
 func AppendRoute(cidr string) error {
@@ -201,7 +141,6 @@ const (
 	ReasonAuthExpired    Reason = "auth-expired"
 	ReasonNetworkDrop    Reason = "network-drop"
 	ReasonStartupFailure Reason = "startup-failure"
-	ReasonTunnelDied     Reason = "tunnel-died"
 	ReasonWake           Reason = "wake"
 	ReasonUnknown        Reason = "unknown"
 )

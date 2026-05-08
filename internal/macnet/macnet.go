@@ -1,12 +1,39 @@
 package macnet
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 )
+
+// IfaceIPv4 returns the first IPv4 address assigned to the given network
+// interface, or "" when the interface is absent / has no inet entry. Wraps
+// `ifconfig <name>` and parses the textual output rather than going
+// through getifaddrs(3) — keeps the package free of cgo for callers that
+// don't already need it (the watcher's status path).
+func IfaceIPv4(name string) string {
+	out, err := exec.Command("ifconfig", name).Output()
+	if err != nil {
+		return ""
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(out))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "inet ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			// "inet 10.212.134.220 --> 10.212.134.1 ..." → "10.212.134.220"
+			return fields[1]
+		}
+	}
+	return ""
+}
 
 // AddRoute adds a network route through the given interface.
 func AddRoute(cidr, dev string) error {
@@ -45,17 +72,13 @@ func RemoveResolver(domain string) error {
 	return nil
 }
 
-// SudoValidate primes the sudo credential cache so subsequent sudo -n commands don't prompt.
-// Inherits stdin/stdout/stderr so the user can type their password if needed.
+// SudoValidate primes the sudo credential cache so subsequent sudo -n
+// commands don't prompt. Inherits stdin/stdout/stderr so the user can type
+// their password if needed.
 func SudoValidate() error {
 	cmd := exec.Command("sudo", "-v")
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
-}
-
-// SudoKill sends SIGTERM to a pid via sudo.
-func SudoKill(pid int) error {
-	return exec.Command("sudo", "-n", "kill", fmt.Sprintf("%d", pid)).Run()
 }

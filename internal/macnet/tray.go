@@ -32,9 +32,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
 
 	"github.com/rcapraro/packxy/internal/state"
+	"github.com/rcapraro/packxy/internal/ui"
 )
 
 // RunTray bootstraps the menu-bar status item and runs the AppKit event
@@ -63,9 +63,8 @@ func packxy_tray_quit_action() {
 	if real, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = real
 	}
-	// Fire-and-watch: `packxy stop` cleans up the watcher + VPN +
-	// resolvers. We give it a few seconds; the tray's NSApp.terminate
-	// fires immediately after this returns.
+	// `packxy stop` tears down the watcher, VPN and resolvers. The tray's
+	// NSApp.terminate fires immediately after this returns.
 	cmd := exec.Command(exe, "stop")
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
@@ -75,8 +74,8 @@ func packxy_tray_quit_action() {
 // buildTrayState reads the state files written by runStart / the watcher
 // and turns them into the line-oriented blob the tray's C side parses.
 // The format is "KEY:VALUE\n" with a fixed set of keys (STATE, IP,
-// ROUTES, DNS, DROP) — simple enough to avoid pulling in encoding/json
-// for what's essentially five strings.
+// ROUTES, DNS, DROP) — simpler than pulling in encoding/json for what's
+// essentially five strings.
 func buildTrayState() string {
 	watcherPID, _ := state.ReadWatcherPID()
 	vpnPID, _ := state.ReadVPNPID()
@@ -95,14 +94,17 @@ func buildTrayState() string {
 		connState = "partial"
 	}
 
+	// Hardcoded "ppp0" rather than importing forti.Iface to keep macnet
+	// independent of forti (forti depends on macnet, not the other way
+	// around).
 	ip := ""
 	if vpnUp {
-		ip = readPPP0IPForTray()
+		ip = IfaceIPv4("ppp0")
 	}
 
 	dropLine := ""
 	if hasDrop {
-		dropLine = fmt.Sprintf("%s (%s)", last.Reason, humanizeAge(last.At))
+		dropLine = fmt.Sprintf("%s (%s)", last.Reason, ui.HumanizeAge(last.At))
 	}
 
 	var b strings.Builder
@@ -112,32 +114,4 @@ func buildTrayState() string {
 	fmt.Fprintf(&b, "DNS:%s\n", strings.Join(domains, ", "))
 	fmt.Fprintf(&b, "DROP:%s\n", dropLine)
 	return b.String()
-}
-
-func readPPP0IPForTray() string {
-	out, err := exec.Command("ifconfig", "ppp0").Output()
-	if err != nil {
-		return ""
-	}
-	for _, line := range strings.Split(string(out), "\n") {
-		f := strings.Fields(strings.TrimSpace(line))
-		if len(f) >= 2 && f[0] == "inet" {
-			return f[1]
-		}
-	}
-	return ""
-}
-
-func humanizeAge(at time.Time) string {
-	d := time.Since(at)
-	switch {
-	case d < time.Minute:
-		return fmt.Sprintf("%ds ago", int(d.Seconds()))
-	case d < time.Hour:
-		return fmt.Sprintf("%dm ago", int(d.Minutes()))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh ago", int(d.Hours()))
-	default:
-		return at.Local().Format("2006-01-02 15:04")
-	}
 }

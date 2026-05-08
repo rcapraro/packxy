@@ -1,20 +1,36 @@
-// Command packxy is a self-contained macOS split-tunneling launcher for FortiGate VPN.
+// Command packxy is a self-contained macOS split-tunneling launcher for
+// FortiGate VPN.
 //
-// It runs openfortivpn natively as a subprocess, creating a ppp0
-// interface on the host. macOS routes for the configured CIDRs are pointed at
-// ppp0, and /etc/resolver entries are written for the configured internal
+// It runs openfortivpn natively as a subprocess, creating a ppp0 interface
+// on the host. macOS routes for the configured CIDRs are pointed at ppp0,
+// and /etc/resolver entries are written for the configured internal
 // domains. The default route and /etc/resolv.conf are left untouched —
 // openfortivpn is configured with set-routes=0 / set-dns=0 and pppd with
 // nodefaultroute to preserve split tunneling.
 //
-// Subcommands:
+// User-facing subcommands:
 //
 //	packxy install   — one-time: install sudoers drop-in + /etc/ppp/peers/packxy
+//	                   (and /usr/local/bin/packxy symlink when run from .app)
 //	packxy uninstall — remove the install artifacts
-//	packxy start     — launch openfortivpn, add routes/DNS, arm the watcher
+//	packxy start     — launch openfortivpn, add routes/DNS, arm the watcher,
+//	                   and (from the .app bundle) the menu-bar tray
 //	packxy stop      — tear everything down
-//	packxy status    — show watcher / VPN / routes state
-//	packxy _watcher  — internal: monitors openfortivpn and re-prompts OTP on drop
+//	packxy status    — show watcher / VPN / tray / routes state
+//
+// Internal subcommands (re-exec'd by `packxy start` itself):
+//
+//	packxy _watcher    — Setsid'd daemon that monitors openfortivpn, reacts
+//	                     to IOKit sleep/wake notifications, and re-prompts
+//	                     OTP via _otpdialog on drop.
+//	packxy _otpdialog  — short-lived child of the watcher that bootstraps
+//	                     NSApp and shows a native NSAlert with a text input
+//	                     (the watcher itself can't reliably runModal a
+//	                     dialog from a Setsid'd process).
+//	packxy _tray       — long-lived menu-bar status item (NSStatusItem) that
+//	                     polls /tmp/packxy state and renders an icon plus a
+//	                     dropdown menu. Spawned only when `packxy start` is
+//	                     itself invoked from the .app bundle.
 package main
 
 import (
@@ -462,6 +478,7 @@ func fortiConfig(cfg *envcfg.Config) forti.Config {
 		OTP:         cfg.OTP,
 		Realm:       cfg.Realm,
 		TrustedCert: cfg.TrustedCert,
+		OTPPrompt:   cfg.OTPPrompt,
 		NoFTMPush:   cfg.NoFTMPush == "1",
 	}
 }
@@ -670,7 +687,7 @@ func runStatus() int {
 	vpnUp := vpnPID > 0 && state.ProcessAlive(vpnPID)
 	ip := ""
 	if vpnUp {
-		ip = readPPP0IP()
+		ip = macnet.IfaceIPv4(forti.Iface)
 	}
 	upCount := boolToInt(watcherUp) + boolToInt(vpnUp)
 
@@ -698,27 +715,13 @@ func runStatus() int {
 		card = append(card, ui.CardLine{
 			Icon:  "💔",
 			Label: "Last drop",
-			Value: fmt.Sprintf("%s (%s)", humanizeAge(lastDrop.At), lastDrop.Reason),
+			Value: fmt.Sprintf("%s (%s)", ui.HumanizeAge(lastDrop.At), lastDrop.Reason),
 		})
 	}
 
 	ui.SummaryCard(connColor, card)
 	fmt.Println()
 	return 0
-}
-
-func readPPP0IP() string {
-	out, err := exec.Command("ifconfig", forti.Iface).Output()
-	if err != nil {
-		return ""
-	}
-	for _, line := range strings.Split(string(out), "\n") {
-		f := strings.Fields(strings.TrimSpace(line))
-		if len(f) >= 2 && f[0] == "inet" {
-			return f[1]
-		}
-	}
-	return ""
 }
 
 func statusIcon(ok bool) string {
@@ -764,20 +767,6 @@ func vpnValue(pid int, ip string) string {
 		return fmt.Sprintf("running (pid %d, %s not up)", pid, forti.Iface)
 	}
 	return fmt.Sprintf("%s %s (pid %d)", forti.Iface, ip, pid)
-}
-
-func humanizeAge(at time.Time) string {
-	d := time.Since(at)
-	switch {
-	case d < time.Minute:
-		return fmt.Sprintf("%ds ago", int(d.Seconds()))
-	case d < time.Hour:
-		return fmt.Sprintf("%dm ago", int(d.Minutes()))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh ago", int(d.Hours()))
-	default:
-		return at.Local().Format("2006-01-02 15:04")
-	}
 }
 
 // =====================================================================
@@ -874,7 +863,7 @@ func runWatcher(args []string) int {
 		logf("openfortivpn pid %d gone (%s) — notifying user", pid, reason)
 		state.ClearVPNPID()
 		_ = state.WriteLastDrop(time.Now(), reason)
-		_ = macnet.Notify("Packxy — VPN disconnected", macnet.OTPDropMessage(reason))
+		_ = macnet.Notify("Packxy — VPN disconnected", macnet.OTPHeadline(reason))
 
 		if !reconnectLoop(ctx, logf, reason) {
 			return 0
@@ -984,6 +973,7 @@ func reconnectLoop(ctx context.Context, logf func(string, ...any), initialReason
 			OTP:         otp,
 			Realm:       os.Getenv("FORTI_REALM"),
 			TrustedCert: os.Getenv("FORTI_TRUSTED_CERT"),
+			OTPPrompt:   os.Getenv("FORTI_OTP_PROMPT"),
 			NoFTMPush:   os.Getenv("FORTI_NO_FTM_PUSH") == "1",
 		}
 

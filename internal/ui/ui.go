@@ -238,6 +238,24 @@ func MutedHint(s string) {
 	fmt.Println(muted.Render(s))
 }
 
+// HumanizeAge renders the elapsed time since `at` in a compact form
+// (`5s ago`, `12m ago`, `3h ago`, or an absolute date when older than a
+// day). Used by the status panel and the menu-bar tray to describe drop
+// timestamps.
+func HumanizeAge(at time.Time) string {
+	d := time.Since(at)
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds ago", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return at.Local().Format("2006-01-02 15:04")
+	}
+}
+
 // KeyValue renders one aligned key/value row for help and usage screens.
 // The key is emphasized; the description is rendered as hint text.
 func KeyValue(key, value string) {
