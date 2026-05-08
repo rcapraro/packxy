@@ -100,12 +100,17 @@ func runInstall() int {
 		return 1
 	}
 
+	bundleExe, bundled := bundleExecutable()
+
 	ui.Page()
 	ui.Header()
 	ui.Section("Install")
 	ui.StepInfo("This will write:")
 	ui.Line(fmt.Sprintf("  • %s (sudoers drop-in)", forti.SudoersPath))
 	ui.Line(fmt.Sprintf("  • /etc/ppp/peers/%s (pppd options)", forti.PeerName))
+	if bundled {
+		ui.Line(fmt.Sprintf("  • %s → %s (CLI symlink)", cliSymlinkPath, bundleExe))
+	}
 	fmt.Println()
 	ui.StepInfo("sudo password may be required.")
 
@@ -120,8 +125,55 @@ func runInstall() int {
 	}
 	ui.StepOK("Installed sudoers drop-in for " + u.Username)
 	ui.StepOK("Installed /etc/ppp/peers/" + forti.PeerName)
+
+	if bundled {
+		if err := installCLISymlink(bundleExe); err != nil {
+			ui.StepWarn("CLI symlink not created: " + err.Error())
+		} else {
+			ui.StepOK("Symlinked " + cliSymlinkPath + " → bundle binary")
+		}
+	}
+
 	fmt.Println()
 	return 0
+}
+
+// cliSymlinkPath is where the .app installer drops a `packxy` symlink so
+// users can invoke the CLI from anywhere on $PATH without typing the full
+// bundle path.
+const cliSymlinkPath = "/usr/local/bin/packxy"
+
+// bundleExecutable reports whether the running binary lives inside a .app
+// bundle, and if so returns the absolute path to that binary. Anything
+// else means the user is running the bare CLI without bundle benefits.
+func bundleExecutable() (string, bool) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", false
+	}
+	if !strings.Contains(exe, ".app/Contents/MacOS/") {
+		return "", false
+	}
+	return exe, true
+}
+
+// installCLISymlink writes a `/usr/local/bin/packxy` symlink pointing at
+// the bundled executable. Idempotent: a correct existing symlink is a
+// no-op; a wrong one is replaced.
+func installCLISymlink(target string) error {
+	if existing, err := os.Readlink(cliSymlinkPath); err == nil && existing == target {
+		return nil
+	}
+	if err := exec.Command("sudo", "-n", "mkdir", "-p", filepath.Dir(cliSymlinkPath)).Run(); err != nil {
+		return fmt.Errorf("mkdir %s: %w", filepath.Dir(cliSymlinkPath), err)
+	}
+	if err := exec.Command("sudo", "-n", "rm", "-f", cliSymlinkPath).Run(); err != nil {
+		return fmt.Errorf("rm old symlink: %w", err)
+	}
+	if err := exec.Command("sudo", "-n", "ln", "-s", target, cliSymlinkPath).Run(); err != nil {
+		return fmt.Errorf("ln -s: %w", err)
+	}
+	return nil
 }
 
 func runUninstall() int {
@@ -138,6 +190,17 @@ func runUninstall() int {
 		return 1
 	}
 	ui.StepOK("Removed packxy install artifacts")
+
+	// Remove the CLI symlink if it points at any packxy bundle. We don't
+	// touch the .app itself — the user installed it somewhere of their
+	// choosing and removing it isn't our call.
+	if existing, err := os.Readlink(cliSymlinkPath); err == nil &&
+		strings.Contains(existing, ".app/Contents/MacOS/packxy") {
+		if err := exec.Command("sudo", "-n", "rm", "-f", cliSymlinkPath).Run(); err == nil {
+			ui.StepOK("Removed " + cliSymlinkPath)
+		}
+	}
+
 	fmt.Println()
 	return 0
 }

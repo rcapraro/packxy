@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>packxy</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.packsolutions.packxy</string>
+    <key>CFBundleName</key>
+    <string>packxy</string>
+    <key>CFBundleDisplayName</key>
+    <string>Packxy</string>
+    <key>CFBundleVersion</key>
+    <string>__VERSION__</string>
+    <key>CFBundleShortVersionString</key>
+    <string>__VERSION__</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <!-- LSUIElement: agent app — no Dock tile, no menu bar, runs purely
+         from the CLI but provides bundle context so notifications and
+         dialogs show the packxy icon instead of the AppleScript icon. -->
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>© Pack Solutions</string>
+</dict>
+</plist>

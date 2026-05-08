@@ -92,19 +92,34 @@ After `packxy start` brings the tunnel up, it spawns a detached background proce
 
 ### 1. Install
 
-After installing the `openfortivpn` binary, build packxy and run a one-time install step:
+Two equivalent paths: download the prebuilt `.app` bundle (recommended) or build from source.
+
+**From a release archive:**
 
 ```bash
-make build
-./packxy install
+# Download packxy-vX.Y.Z-darwin-universal.app.tar.gz from the Releases page
+tar -xzf packxy-*-darwin-universal.app.tar.gz
+./packxy.app/Contents/MacOS/packxy install
 ```
 
-`packxy install` writes two files (sudo password required, **once**):
+**From source:**
+
+```bash
+make app                        # builds packxy.app at the project root
+./packxy.app/Contents/MacOS/packxy install
+```
+
+`packxy install` writes (sudo password required, **once**):
 
 - `/etc/sudoers.d/packxy` — allows your user to run `openfortivpn` and `pkill -x openfortivpn` (TERM/KILL flavours only) without re-prompting for sudo. The watcher needs this to restart the VPN after a drop, and to pre-stop it on macOS sleep notifications, without your sudo cache having to stay fresh.
 - `/etc/ppp/peers/packxy` — pppd options that preserve split tunneling (`nodefaultroute`) and configure the LCP echo keepalive.
+- `/usr/local/bin/packxy` — symlink to `Contents/MacOS/packxy` inside the `.app`, so you can call `packxy` from any terminal once you've moved the bundle wherever you want it (typical: `/Applications/packxy.app`).
 
-To remove these files later: `./packxy uninstall`.
+To remove these files later: `./packxy uninstall` (or just `packxy uninstall` if the symlink is in place). The `.app` itself isn't touched — drop it in the Trash by hand.
+
+### Why a `.app` bundle?
+
+The watcher posts macOS notifications when the VPN drops or you need to enter a new OTP. If packxy ran as a bare CLI, those notifications would carry the AppleScript script-runner icon (Apple's CLI surface gives no way to override it). Bundled inside `packxy.app`, packxy uses `NSUserNotification` directly via cgo + AppKit, and the notifications display the bundle's icon (a violet-to-cyan padlock) and identifier instead. The bundle is ad-hoc-signed at build time, so macOS treats it as a real, locally-trusted app.
 
 ### 2. Configure
 
@@ -233,12 +248,14 @@ curl http://internal-app.example.com
 
 | Action | Command |
 |---|---|
-| Install (one-time) | `./packxy install` |
-| Uninstall | `./packxy uninstall` |
-| Start VPN | `./packxy start` |
-| Stop VPN | `./packxy stop` |
-| Show state | `./packxy status` |
-| Rebuild binary | `make build` |
+| Install (one-time) | `packxy install` |
+| Uninstall | `packxy uninstall` |
+| Start VPN | `packxy start` |
+| Stop VPN | `packxy stop` |
+| Show state | `packxy status` |
+| Build CLI binary | `make build` |
+| Build `.app` bundle | `make app` (or `make app-universal` for both arches) |
+| Regenerate icon | `make icon` (after editing `cmd/genicon`) |
 | Inspect VPN logs | `cat /tmp/packxy/openfortivpn.log` |
 | Inspect watcher logs | `cat /tmp/packxy/watcher.log` |
 
@@ -281,19 +298,24 @@ sudo rm /etc/resolver/packsolutions.local
 | File | Purpose |
 |---|---|
 | `cmd/packxy/main.go` | CLI entry — `install` / `start` / `stop` / `status` / `_watcher` |
+| `cmd/genicon/main.go` | Build-time tool: paints `assets/icon.png` (1024×1024 padlock) |
 | `internal/forti/` | Native openfortivpn driver, install/uninstall, default-route capture/restore |
 | `internal/macnet/` | macOS networking helpers (routes, DNS, sudo, OTP dialog) |
 | `internal/macnet/sleepwake.go` | IOKit cgo bridge — `IORegisterForSystemPower` → Go channel |
+| `internal/macnet/notification.go` | NSUserNotification cgo bridge for bundle-iconed notifications |
 | `internal/ui/` | Terminal UI (huh prompts + lipgloss styling) |
 | `internal/envcfg/` | `.env` loading |
 | `internal/state/` | `/tmp/packxy` state (PIDs, routes, domains, last drop) |
-| `Makefile` | `build`, `build-arm64`, `build-amd64`, `universal`, `clean` |
+| `resources/Info.plist` | `.app` bundle metadata template (CFBundleIdentifier, LSUIElement) |
+| `assets/icon.png` | Source artwork for `AppIcon.icns` (regenerate with `make icon`) |
+| `Makefile` | `build`, `app`, `app-universal`, `icon`, `universal`, `clean` |
 | `.env` | Your VPN credentials and routing config (git-ignored) |
 | `.env.sample` | Template for `.env` |
 
 ## Security notes
 
 - The sudoers drop-in (`/etc/sudoers.d/packxy`) grants exactly two passwordless commands: `/opt/homebrew/bin/openfortivpn` (any args, since openfortivpn itself is the only thing it can launch as root) and `/usr/bin/pkill` restricted to the `-x openfortivpn` target. Inspect with `cat /etc/sudoers.d/packxy`.
+- The `.app` bundle is ad-hoc-signed (`codesign --sign -`), enough for local trust on the machine that built or downloaded it. There is no Developer ID / notarization — first-run warnings on a fresh download are expected. Right-click → Open or `xattr -dr com.apple.quarantine packxy.app` to clear them.
 - Do not commit `.env` — it contains your VPN password.
 - OTP codes are single-use; do not store them in `.env`.
 

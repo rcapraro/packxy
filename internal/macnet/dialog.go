@@ -3,6 +3,7 @@ package macnet
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -82,17 +83,33 @@ func otpMessage(reason state.Reason) string {
 	}
 }
 
-// Notify posts a native macOS notification via osascript. The notification
-// shows the AppleScript script-runner icon — Apple's CLI surface for user
-// notifications doesn't expose a way to override it from a non-bundled tool.
+// Notify posts a native macOS notification.
 //
-// Routing through `tell application "System Events"` would suppress the
-// icon side-effects, but requires TCC Automation permission that a Setsid
-// daemon can't request. We accept the script icon in exchange for
-// reliability from the watcher process.
+// When packxy runs from inside its .app bundle (after `packxy install`), it
+// uses NSUserNotification via cgo: the notification is attributed to our
+// bundle and picks up the packxy padlock icon. Otherwise (running the bare
+// CLI binary outside the .app), it falls back to osascript — that path
+// shows the AppleScript script-runner icon, but at least surfaces the
+// notification reliably.
 func Notify(title, body string) error {
+	if runningInsideBundle() {
+		sendNSNotification(title, body)
+		return nil
+	}
 	script := `display notification ` + appleQuote(body) + ` with title ` + appleQuote(title)
 	return exec.Command("osascript", "-e", script).Run()
+}
+
+// runningInsideBundle reports whether the running executable lives inside a
+// macOS .app bundle (.../Contents/MacOS/...). Used to gate cgo notification
+// calls — they only render correctly when the calling process has a bundle
+// identity.
+func runningInsideBundle() bool {
+	exe, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(exe, ".app/Contents/MacOS/")
 }
 
 // appleQuote returns an AppleScript-safe double-quoted literal of s.

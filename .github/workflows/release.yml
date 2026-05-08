@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   release:
-    name: Build & Publish (macOS universal)
+    name: Build & Publish (macOS .app universal)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,82 +24,70 @@ jobs:
         id: ver
         run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
 
-      # cgo is required (IOKit power-state notifications). The macos-latest
-      # runner ships a universal Xcode SDK, so `cc -arch <target>`
-      # cross-compiles to either arm64 or x86_64 from the same host.
-      - name: Build darwin/arm64
-        env:
-          CGO_ENABLED: "1"
-          GOOS: darwin
-          GOARCH: arm64
-          CC: cc -arch arm64
-        run: |
-          mkdir -p build
-          go build -trimpath -ldflags="-s -w" \
-            -o build/packxy-arm64 ./cmd/packxy
+      - name: Build universal .app
+        # `make app-universal` regenerates the icon, builds darwin/arm64 +
+        # darwin/amd64 with cgo, lipos them into a fat binary, fans the icon
+        # out to a multi-resolution iconset, and ad-hoc signs the bundle.
+        # All the cross-compile env (CGO_ENABLED, CC=cc -arch ...) lives in
+        # the Makefile so the CI step is just `make`.
+        run: make app-universal VERSION="${{ steps.ver.outputs.version }}"
 
-      - name: Build darwin/amd64
-        env:
-          CGO_ENABLED: "1"
-          GOOS: darwin
-          GOARCH: amd64
-          CC: cc -arch x86_64
+      - name: Inspect bundle
         run: |
-          go build -trimpath -ldflags="-s -w" \
-            -o build/packxy-amd64 ./cmd/packxy
+          file dist/packxy.app/Contents/MacOS/packxy
+          codesign -dv dist/packxy.app
+          plutil -p dist/packxy.app/Contents/Info.plist | head -20
 
-      - name: Create universal binary
-        run: |
-          lipo -create -output build/packxy-universal \
-            build/packxy-arm64 build/packxy-amd64
-          file build/packxy-arm64
-          file build/packxy-amd64
-          file build/packxy-universal
-
-      - name: Package archives
+      - name: Package release archives
         run: |
           V="${{ steps.ver.outputs.version }}"
-          mkdir -p dist
-          for arch in arm64 amd64 universal; do
-            stage="build/stage-${arch}"
+          mkdir -p release
+          # The .app archive — primary download for end users.
+          tar -C dist -czf "release/packxy-${V}-darwin-universal.app.tar.gz" \
+            packxy.app
+          # Bare arch-specific binaries for users who don't want the bundle
+          # (or want to integrate without /Applications). Include README +
+          # .env.sample so the tarball is self-contained.
+          for arch in arm64 amd64; do
+            stage="release/stage-${arch}"
             mkdir -p "${stage}"
-            cp "build/packxy-${arch}" "${stage}/packxy"
-            cp README.md "${stage}/" 2>/dev/null || true
-            cp .env.sample "${stage}/" 2>/dev/null || true
-            tar -czf "dist/packxy-${V}-darwin-${arch}.tar.gz" -C "${stage}" .
+            cp "dist/packxy-${arch}" "${stage}/packxy"
+            cp README.md .env.sample "${stage}/"
+            tar -czf "release/packxy-${V}-darwin-${arch}.tar.gz" -C "${stage}" .
           done
 
       - name: Generate checksums
-        working-directory: dist
-        run: shasum -a 256 *.tar.gz > checksums.txt
+        working-directory: release
+        run: |
+          rm -rf stage-arm64 stage-amd64
+          shasum -a 256 *.tar.gz > checksums.txt
+          cat checksums.txt
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/*.tar.gz
-            dist/checksums.txt
+            release/*.tar.gz
+            release/checksums.txt
           generate_release_notes: true
           fail_on_unmatched_files: true
           body: |
             ## Installation
 
-            1. Download the universal archive for your Mac (`packxy-${{ steps.ver.outputs.version }}-darwin-universal.tar.gz`) or the arch-specific one.
-            2. Extract:
-               ```bash
-               tar -xzf packxy-*.tar.gz
-               chmod +x packxy
-               ```
-            3. One-time setup (writes the sudoers drop-in and the pppd peer file — sudo prompt once):
-               ```bash
-               ./packxy install
-               ```
-            4. Configure `.env` (see `.env.sample`) and connect:
-               ```bash
-               cp .env.sample .env
-               # edit .env: FORTI_HOST, FORTI_USER, FORTI_PASS, VPN_ROUTES, VPN_DNS, VPN_DOMAINS
-               ./packxy start
-               ```
+            **Recommended — universal `.app` bundle (Apple Silicon + Intel):**
+
+            ```bash
+            curl -L -O https://github.com/${{ github.repository }}/releases/download/${{ steps.ver.outputs.version }}/packxy-${{ steps.ver.outputs.version }}-darwin-universal.app.tar.gz
+            tar -xzf packxy-*-darwin-universal.app.tar.gz
+            ./packxy.app/Contents/MacOS/packxy install
+            ```
+
+            `packxy install` copies the bundle to `/Applications/packxy.app` and symlinks the CLI to `/usr/local/bin/packxy`. After that you can call `packxy` directly from the terminal.
+
+            **Configure** `.env` (see [`.env.sample`](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/.env.sample)) and connect:
+            ```bash
+            packxy start
+            ```
 
             See the [README](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md) for the full guide.
 
