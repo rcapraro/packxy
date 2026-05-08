@@ -18,11 +18,20 @@ var ErrDialogCancelled = errors.New("dialog cancelled")
 //
 // The OTP is shown in cleartext: it's a 30-second token, hiding it only
 // hides typos.
+//
+// We route the dialog through System Events rather than letting osascript
+// own it. Without a host app, macOS attributes osascript dialogs to a
+// transient "Script Editor" persona, which makes a script icon appear in
+// the menu bar / Dock. System Events is a long-running system process with
+// its own icon, so the prompt looks native and no spurious icon is added.
 func PromptOTP(message string) (string, error) {
-	script := `set d to display dialog ` + appleQuote(message) +
+	script := `tell application "System Events"
+	activate
+	set d to display dialog ` + appleQuote(message) +
 		` default answer "" with title "packxy"` +
-		` buttons {"Cancel", "OK"} default button "OK" cancel button "Cancel"` +
-		"\nreturn text returned of d"
+		` buttons {"Cancel", "OK"} default button "OK" cancel button "Cancel"
+	return text returned of d
+end tell`
 
 	cmd := exec.Command("osascript", "-e", script)
 	out, err := cmd.Output()
@@ -74,11 +83,14 @@ func otpMessage(reason state.Reason) string {
 	}
 }
 
-// Notify posts a native macOS notification via osascript. The notification
-// shows the AppleScript script-runner icon — Apple's CLI surface for user
-// notifications doesn't expose a way to override it from a non-bundled tool.
+// Notify posts a native macOS notification via osascript routed through
+// System Events. The notification shows the AppleScript script-runner icon
+// — Apple's CLI surface for user notifications doesn't expose a way to
+// override it from a non-bundled tool — but routing through System Events
+// avoids the transient script icon appearing elsewhere in the UI.
 func Notify(title, body string) error {
-	script := `display notification ` + appleQuote(body) + ` with title ` + appleQuote(title)
+	script := `tell application "System Events" to display notification ` +
+		appleQuote(body) + ` with title ` + appleQuote(title)
 	return exec.Command("osascript", "-e", script).Run()
 }
 

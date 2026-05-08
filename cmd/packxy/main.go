@@ -854,6 +854,7 @@ func reconnectLoop(ctx context.Context, logf func(string, ...any), initialReason
 		}
 
 		_ = state.WriteVPNPID(p.PID)
+		state.ClearLastDrop()
 		logf("VPN reconnected (ppp0 %s, pid %d) after %d auth fail(s), %d infra fail(s)",
 			p.IP, p.PID, authFails, infraFails)
 		_ = macnet.Notify("packxy", "✓ VPN reconnected")

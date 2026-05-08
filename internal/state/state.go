@@ -180,6 +180,13 @@ func WriteLastDrop(at time.Time, reason Reason) error {
 	return os.WriteFile(filepath.Join(Dir, lastDropFile), []byte(body), 0o644)
 }
 
+// ClearLastDrop removes the last-drop record. Called after a successful
+// reconnect so `packxy status` doesn't keep surfacing a stale "💔 Last drop"
+// line that suggests an unresolved issue when the tunnel is in fact fine.
+func ClearLastDrop() {
+	_ = os.Remove(filepath.Join(Dir, lastDropFile))
+}
+
 // ReadLastDrop returns the last recorded drop, or ok=false if none.
 func ReadLastDrop() (LastDrop, bool, error) {
 	b, err := os.ReadFile(filepath.Join(Dir, lastDropFile))
