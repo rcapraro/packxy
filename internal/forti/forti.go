@@ -341,7 +341,7 @@ func Install(username, binPath string, interval, failure int) error {
 #                   route hijack and preserve split tunneling.
 #
 # Remove this file with `+"`packxy uninstall`"+` or `+"`sudo rm %s`"+`.
-%s ALL=(root) NOPASSWD: %s, /usr/bin/pkill -x openfortivpn, /usr/bin/pkill -[0-9]* -x openfortivpn, /usr/bin/pkill -TERM -x openfortivpn, /usr/bin/pkill -KILL -x openfortivpn, /sbin/route
+%s ALL=(root) NOPASSWD: %s, /usr/bin/pkill -TERM -x openfortivpn, /usr/bin/pkill -KILL -x openfortivpn, /sbin/route
 `, username, SudoersPath, username, binPath)
 
 	tmp, err := os.CreateTemp("", "packxy-sudoers-*")
