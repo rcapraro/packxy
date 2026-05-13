@@ -132,8 +132,9 @@ make app                        # builds packxy.app at the project root
 - `/etc/sudoers.d/packxy` — allows your user to run `openfortivpn` and `pkill -x openfortivpn` (TERM/KILL flavours only) without re-prompting for sudo. The watcher needs this to restart the VPN after a drop, and to pre-stop it on macOS sleep notifications, without your sudo cache having to stay fresh.
 - `/etc/ppp/peers/packxy` — pppd options that preserve split tunneling (`nodefaultroute`) and configure the LCP echo keepalive.
 - `/usr/local/bin/packxy` — symlink to `Contents/MacOS/packxy` inside the `.app`, so you can call `packxy` from any terminal once you've moved the bundle wherever you want it (typical: `/Applications/packxy.app`).
+- `~/.config/packxy.conf` — starter config written from the embedded template, **only if it doesn't exist yet**. Permissions are `0600` (the file holds your VPN password). An existing config is never overwritten — safe to re-run `packxy install` after upgrading the binary.
 
-To remove these files later: `./packxy uninstall` (or just `packxy uninstall` if the symlink is in place). The `.app` itself isn't touched — drop it in the Trash by hand.
+To remove these files later: `./packxy uninstall` (or just `packxy uninstall` if the symlink is in place). The `.app` itself isn't touched — drop it in the Trash by hand. `~/.config/packxy.conf` is left in place so you don't lose your credentials.
 
 ### Why a `.app` bundle?
 
@@ -141,13 +142,13 @@ The watcher posts macOS notifications when the VPN drops or you need to enter a 
 
 ### 2. Configure
 
-Copy the sample environment file and fill in your values:
+`packxy install` already dropped a starter config at `~/.config/packxy.conf`. Open it in your editor and fill in the blanks — `packxy start` will read it from any directory.
 
 ```bash
-cp .env.sample .env
+$EDITOR ~/.config/packxy.conf
 ```
 
-Edit `.env` in two parts:
+The file has two parts:
 
 **a) VPN credentials** — fill in your FortiGate connection details:
 
@@ -169,7 +170,7 @@ You need three pieces of information from your network administrator:
 | Internal DNS server | Ask your admin, or check `/etc/resolv.conf` while connected | `10.0.0.1` |
 | Internal domain names | The domain suffix of your internal apps (e.g. `*.packsolutions.local`) | `packsolutions.local` |
 
-Then set these in `.env`:
+Then set these in the same file:
 
 ```env
 VPN_ROUTES=10.0.0.0/8
@@ -182,6 +183,11 @@ This tells Packxy:
 - **`VPN_DNS`**: resolve internal hostnames using the DNS server at `10.0.0.1` (via the VPN)
 - **`VPN_DOMAINS`**: only use that DNS server for `*.packsolutions.local` names (all other DNS stays local)
 
+**Alternative config locations.** `packxy start` resolves the config in this order:
+
+1. `$PACKXY_CONFIG` (explicit override — useful for multiple FortiGate profiles)
+2. `~/.config/packxy.conf` (default)
+
 See [Configuration reference](#configuration-reference) for all options.
 
 ### 3. Connect
@@ -190,7 +196,7 @@ See [Configuration reference](#configuration-reference) for all options.
 packxy start
 ```
 
-`packxy start` reads `.env`, displays whatever it found in a "From .env:" reminder card (so you don't retype it), and only prompts for fields that are missing — plus the **OTP code**, which is always asked for fresh (single-use). On success it brings up `ppp0`, adds the routes, writes the resolvers, arms the watcher, and (from the `.app` bundle) shows the menu-bar tray.
+`packxy start` reads `~/.config/packxy.conf`, displays whatever it found in a "From config:" reminder card (so you don't retype it), and only prompts for fields that are missing — plus the **OTP code**, which is always asked for fresh (single-use). On success it brings up `ppp0`, adds the routes, writes the resolvers, arms the watcher, and (from the `.app` bundle) shows the menu-bar tray.
 
 ### 4. Disconnect
 
@@ -202,7 +208,7 @@ This kills the menu-bar tray, the watcher, and `openfortivpn`, and removes the `
 
 ## Configuration reference
 
-All settings go in the `.env` file. Values are pre-filled in the interactive prompts.
+All settings go in `~/.config/packxy.conf` (or whichever file `packxy start` resolves to — see [Configure](#2-configure)). Values are pre-filled in the interactive prompts.
 
 ### VPN connection
 
@@ -214,7 +220,7 @@ All settings go in the `.env` file. Values are pre-filled in the interactive pro
 | `FORTI_PASS` | yes | VPN password |
 | `FORTI_TRUSTED_CERT` | | Server certificate SHA-256 fingerprint (avoids certificate prompts) |
 | `FORTI_REALM` | | VPN realm, if your server requires one |
-| `FORTI_OTP` | | 6-digit 2FA code — **do not save in `.env`**, enter it fresh each time |
+| `FORTI_OTP` | | 6-digit 2FA code — **do not save in the config**, enter it fresh each time |
 | `FORTI_NO_FTM_PUSH` | | Set to `1` to disable FortiToken push and force manual OTP entry |
 | `FORTI_OTP_PROMPT` | | Custom OTP prompt string for prompt detection |
 
@@ -285,7 +291,7 @@ Install it: `brew install openfortivpn`. Then run `packxy install` again so the 
 
 ### Authentication failed
 
-- Double-check `FORTI_HOST`, `FORTI_USER`, `FORTI_PASS`, and `FORTI_TRUSTED_CERT`
+- Double-check `FORTI_HOST`, `FORTI_USER`, `FORTI_PASS`, and `FORTI_TRUSTED_CERT` in `~/.config/packxy.conf`
 - OTP codes expire quickly — enter the code as soon as it appears
 - If using FortiToken push, try setting `FORTI_NO_FTM_PUSH=1` to switch to manual OTP
 - Check the logs: `cat /tmp/packxy/openfortivpn.log`
@@ -332,20 +338,20 @@ interface goes down — no manual cleanup needed there.
 | `internal/macnet/sleepwake.go` | IOKit cgo bridge — `IORegisterForSystemPower` → Go channel |
 | `internal/macnet/tray.go` + `tray_objc.m` | NSStatusItem menu-bar indicator (Go bindings + Objective-C impl) |
 | `internal/ui/` | Terminal UI (huh prompts, lipgloss styling, `HumanizeAge` formatter) |
-| `internal/envcfg/` | `.env` loading |
+| `internal/envcfg/` | Config loading (`$PACKXY_CONFIG` then `~/.config/packxy.conf`) + embedded starter template |
+| `internal/envcfg/packxy.conf.sample` | Starter template embedded into the binary; written to `~/.config/packxy.conf` by `packxy install` if missing |
 | `internal/state/` | `/tmp/packxy` state (PID files, routes, domains, last drop) |
 | `resources/Info.plist` | `.app` bundle metadata template (CFBundleIdentifier, LSUIElement) |
 | `assets/icon.png` | Source artwork for `AppIcon.icns` (regenerate with `make icon`) |
 | `Makefile` | `build`, `app`, `app-universal`, `icon`, `clean` |
-| `.env` | Your VPN credentials and routing config (git-ignored) |
-| `.env.sample` | Template for `.env` |
+| `~/.config/packxy.conf` | Your VPN credentials and routing config (created by `packxy install`, perms `0600`) |
 
 ## Security notes
 
 - The sudoers drop-in (`/etc/sudoers.d/packxy`) grants exactly three passwordless commands: `openfortivpn` (any args, since openfortivpn itself is the only thing the rule can launch as root), `pkill` narrowly scoped to the `-x openfortivpn` target, and `route` (needed to restore the host's default route after pppd hijacks it, and to re-add VPN routes after each reconnect). Inspect with `cat /etc/sudoers.d/packxy`.
 - The `.app` bundle is ad-hoc-signed (`codesign --sign -`), enough for local trust on the machine that built or downloaded it. There is no Developer ID / notarization — first-run Gatekeeper warnings on a fresh download are expected. Right-click → Open, or run `xattr -dr com.apple.quarantine packxy.app`, to clear them.
-- Do not commit `.env` — it contains your VPN password.
-- OTP codes are single-use; do not store them in `.env`.
+- `~/.config/packxy.conf` is created with `0600` permissions because it holds your VPN password. Keep it that way — do not loosen with `chmod`, and never check it into git.
+- OTP codes are single-use; do not store them in the config file.
 
 ## References
 

@@ -1,11 +1,13 @@
 # =============================================================================
 #  Packxy — FortiGate VPN split tunneling configuration
 #
-#  Copy this file to .env and fill in your values:
-#    cp .env.sample .env
+#  `packxy install` writes this file to ~/.config/packxy.conf the first
+#  time it runs. Edit that copy and fill in your values — the file is
+#  loaded automatically by `packxy start`, no matter which directory you
+#  invoke it from.
 #
 #  All values are used as defaults in the interactive prompts.
-#  You will always be prompted for a fresh OTP code.
+#  You will always be prompted for a fresh OTP code (single-use).
 # =============================================================================
 
 # --- VPN connection (required) ---

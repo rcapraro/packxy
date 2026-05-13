@@ -121,6 +121,7 @@ func runInstall() int {
 	}
 
 	bundleExe, bundled := bundleExecutable()
+	cfgDefault, _ := envcfg.DefaultPath()
 
 	ui.Page()
 	ui.Header()
@@ -130,6 +131,9 @@ func runInstall() int {
 	ui.Line(fmt.Sprintf("  • /etc/ppp/peers/%s (pppd options)", forti.PeerName))
 	if bundled {
 		ui.Line(fmt.Sprintf("  • %s → %s (CLI symlink)", cliSymlinkPath, bundleExe))
+	}
+	if cfgDefault != "" {
+		ui.Line(fmt.Sprintf("  • %s (starter config — only if missing)", cfgDefault))
 	}
 	fmt.Println()
 	ui.StepInfo("sudo password may be required.")
@@ -152,6 +156,15 @@ func runInstall() int {
 		} else {
 			ui.StepOK("Symlinked " + cliSymlinkPath + " → bundle binary")
 		}
+	}
+
+	switch cfgPath, created, err := envcfg.SeedDefault(); {
+	case err != nil:
+		ui.StepWarn("Starter config not written: " + err.Error())
+	case created:
+		ui.StepOK("Wrote starter config " + cfgPath + " — edit it before `packxy start`")
+	default:
+		ui.StepInfo("Config already present at " + cfgPath + " — left untouched")
 	}
 
 	fmt.Println()
@@ -239,20 +252,22 @@ func runUninstall() int {
 // =====================================================================
 
 func runStart() int {
-	workdir, err := projectDir()
+	cfgPath, err := envcfg.Resolve()
 	if err != nil {
-		ui.PrintErr("could not locate project directory: %v", err)
+		def, _ := envcfg.DefaultPath()
+		ui.PrintErr("%v", err)
+		ui.PrintErr("Run `packxy install` to drop a starter config at %s, then edit it.", def)
 		return 1
 	}
 
-	cfg, err := envcfg.Load(filepath.Join(workdir, ".env"))
+	cfg, err := envcfg.Load(cfgPath)
 	if err != nil {
-		ui.PrintErr("error loading .env: %v", err)
+		ui.PrintErr("error loading %s: %v", cfgPath, err)
 		return 1
 	}
 
 	if !cfg.HasSplitTunneling() {
-		ui.PrintErr("VPN_ROUTES is not configured in .env — split tunneling cannot start.")
+		ui.PrintErr("VPN_ROUTES is not configured in %s — split tunneling cannot start.", cfgPath)
 		ui.PrintErr("Set VPN_ROUTES (and ideally VPN_DNS, VPN_DOMAINS) and try again.")
 		return 1
 	}
@@ -327,7 +342,7 @@ func runStart() int {
 		ui.StepOK("DNS     " + domains)
 	}
 
-	if err := spawnWatcher(workdir); err != nil {
+	if err := spawnWatcher(); err != nil {
 		ui.StepWarn("Watcher not started: " + err.Error())
 	} else {
 		ui.StepOK("Watcher armed (re-prompts OTP if VPN drops)")
@@ -363,14 +378,14 @@ func runStart() int {
 	return 0
 }
 
-// promptCredentials reconciles the on-disk .env config with what the VPN
+// promptCredentials reconciles the on-disk config with what the VPN
 // session needs.
 //
-// Anything already set in .env is shown back as a "📄 From .env" card —
-// the user gets a visual confirmation of what's about to be sent without
-// having to retype it. Only fields the user truly needs to enter are
-// prompted for (always including the OTP, which is a 30 s single-use code
-// that has no business living in .env).
+// Anything already set in the config is shown back as a "📄 From config"
+// card — the user gets a visual confirmation of what's about to be sent
+// without having to retype it. Only fields the user truly needs to enter
+// are prompted for (always including the OTP, which is a 30 s single-use
+// code that has no business living in a file).
 //
 // The card and the huh-styled prompts are visually distinct (border vs.
 // no border, different colour palette) so the boundary between
@@ -395,7 +410,7 @@ func promptCredentials(cfg *envcfg.Config) error {
 		add("🎫", "Realm", cfg.Realm)
 	}
 	if len(card) > 0 {
-		ui.StepInfo("From .env:")
+		ui.StepInfo("From config:")
 		ui.SummaryCard(ui.ColMuted, card)
 		fmt.Println()
 	}
@@ -553,7 +568,7 @@ func waitProcessGone(pattern string, polls int) bool {
 // symlink path as its argv[0], causing both `runningInsideBundle()` and
 // `[NSBundle mainBundle]` to misidentify the process — notifications
 // would silently fall back to osascript with the script-runner icon.
-func spawnWatcher(workdir string) error {
+func spawnWatcher() error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err
@@ -575,7 +590,7 @@ func spawnWatcher(workdir string) error {
 		return err
 	}
 
-	cmd := exec.Command(exe, "_watcher", "-workdir", workdir)
+	cmd := exec.Command(exe, "_watcher")
 	cmd.Env = os.Environ()
 	cmd.Stdin = devNull
 	cmd.Stdout = logF
@@ -841,16 +856,7 @@ func vpnValue(pid int, ip string) string {
 // The watcher exits cleanly on SIGTERM (sent by `packxy stop`). If the user
 // dismisses the OTP dialog, the routes/resolvers are torn down on a
 // best-effort basis so traffic isn't silently black-holed.
-func runWatcher(args []string) int {
-	fs := flag.NewFlagSet("_watcher", flag.ExitOnError)
-	workdir := fs.String("workdir", "", "project directory")
-	_ = fs.Parse(args)
-
-	if *workdir == "" {
-		fmt.Fprintln(os.Stderr, "_watcher: -workdir is required")
-		return 1
-	}
-
+func runWatcher(_ []string) int {
 	defer state.ClearWatcherPID(os.Getpid())
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -868,7 +874,7 @@ func runWatcher(args []string) int {
 			append([]any{time.Now().Format(time.RFC3339)}, a...)...)
 	}
 
-	logf("watcher armed (pid %d), workdir=%s", os.Getpid(), *workdir)
+	logf("watcher armed (pid %d)", os.Getpid())
 	if exe, err := os.Executable(); err == nil {
 		if real, err := filepath.EvalSymlinks(exe); err == nil {
 			exe = real
@@ -1233,27 +1239,3 @@ func runOTPDialog(args []string) int {
 	return 0
 }
 
-// =====================================================================
-//  helpers
-// =====================================================================
-
-// projectDir returns the directory packxy should treat as the project root.
-//
-// Precedence: $PACKXY_DIR > current working directory if it contains .env >
-// directory containing the running executable.
-func projectDir() (string, error) {
-	if v := os.Getenv("PACKXY_DIR"); v != "" {
-		return v, nil
-	}
-	cwd, err := os.Getwd()
-	if err == nil {
-		if _, err := os.Stat(filepath.Join(cwd, ".env")); err == nil {
-			return cwd, nil
-		}
-	}
-	exe, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Dir(exe), nil
-}
