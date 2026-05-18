@@ -47,12 +47,13 @@ jobs:
             packxy.app
           # Bare arch-specific binaries for users who don't want the bundle
           # (or want to integrate without /Applications). Include README +
-          # .env.sample so the tarball is self-contained.
+          # config template so the tarball is self-contained.
           for arch in arm64 amd64; do
             stage="release/stage-${arch}"
             mkdir -p "${stage}"
             cp "dist/packxy-${arch}" "${stage}/packxy"
-            cp README.md .env.sample "${stage}/"
+            cp README.md "${stage}/"
+            cp internal/envcfg/packxy.conf.sample "${stage}/"
             tar -czf "release/packxy-${V}-darwin-${arch}.tar.gz" -C "${stage}" .
           done
 
@@ -84,7 +85,7 @@ jobs:
 
             `packxy install` copies the bundle to `/Applications/packxy.app` and symlinks the CLI to `/usr/local/bin/packxy`. After that you can call `packxy` directly from the terminal.
 
-            **Configure** `.env` (see [`.env.sample`](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/.env.sample)) and connect:
+            **Configure** `~/.config/packxy.conf` — `packxy install` drops a starter template there (see [`packxy.conf.sample`](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/internal/envcfg/packxy.conf.sample)). Then connect:
             ```bash
             packxy start
             ```
