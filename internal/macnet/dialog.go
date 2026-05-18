@@ -21,10 +21,11 @@ var ErrDialogCancelled = errors.New("dialog cancelled")
 // The OTP is shown in cleartext: it's a 30-second token, hiding it only
 // hides typos.
 //
-// `headline` is the bold "what happened" line (used as NSAlert's
-// messageText); `action` is the call to action shown beneath it (used as
-// informativeText). Splitting them this way matches Apple's HIG layout
-// for alerts and keeps the dialog readable instead of one wall of text.
+// `title` is the Packxy-branded bold line shown beside the icon (NSAlert
+// messageText); `detail` is the smaller-text body beneath it (NSAlert
+// informativeText) carrying any explanation plus the call to action.
+// Splitting them this way matches Apple's HIG and keeps the dialog
+// readable instead of one wall of text.
 //
 // Two backends:
 //
@@ -38,15 +39,15 @@ var ErrDialogCancelled = errors.New("dialog cancelled")
 //     `osascript display dialog`. Works but shows the AppleScript
 //     script-runner icon and momentarily places a script entry in the
 //     menu bar.
-func PromptOTP(headline, action string) (string, error) {
+func PromptOTP(title, detail string) (string, error) {
 	if runningInsideBundle() {
-		return promptOTPViaChild(headline, action)
+		return promptOTPViaChild(title, detail)
 	}
 
-	// osascript can't render a separate "headline + body" the way NSAlert
+	// osascript can't render a separate "title + body" the way NSAlert
 	// does, so fold both into one with a blank line in between for
 	// readability.
-	combined := headline + "\n\n" + action
+	combined := title + "\n\n" + detail
 	script := `tell me to activate
 set d to display dialog ` + appleQuote(combined) +
 		` default answer "" with title "Packxy"` +
@@ -65,10 +66,10 @@ return text returned of d`
 	return strings.TrimSpace(string(out)), nil
 }
 
-// promptOTPViaChild spawns `packxy _otpdialog -headline H -action A` and
+// promptOTPViaChild spawns `packxy _otpdialog -title T -detail D` and
 // reads the user's OTP from the child's stdout. Exit code 2 maps to
 // ErrDialogCancelled.
-func promptOTPViaChild(headline, action string) (string, error) {
+func promptOTPViaChild(title, detail string) (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("locate self: %w", err)
@@ -78,8 +79,8 @@ func promptOTPViaChild(headline, action string) (string, error) {
 	}
 
 	cmd := exec.Command(exe, "_otpdialog",
-		"-headline", headline,
-		"-action", action)
+		"-title", title,
+		"-detail", detail)
 	// Inherit stderr so any cgo / AppKit error is visible in watcher.log.
 	cmd.Stderr = os.Stderr
 	out, err := cmd.Output()
@@ -93,45 +94,67 @@ func promptOTPViaChild(headline, action string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// PromptOTPWithReason wraps PromptOTP with a headline/action pair tailored
+// PromptOTPWithReason wraps PromptOTP with a title/detail pair tailored
 // to the cause of the disconnection.
 func PromptOTPWithReason(reason state.Reason) (string, error) {
-	return PromptOTP(OTPHeadline(reason), otpAction(reason))
+	return PromptOTP(otpDialogTitle(reason), otpDialogDetail(reason))
 }
 
-// OTPHeadline returns the bold "what happened" line — used both at the
-// top of the OTP dialog (as NSAlert.messageText) and as the body of the
-// drop notification, so the two surfaces stay coherent. Single sentence
-// ending with a period, per Apple's HIG.
-//
-// Wording stays at the user's level of abstraction: no "pppd", no
-// "openfortivpn", no "peer reset / link silent". Internal diagnostics
-// belong in the watcher log, not in the OTP popup.
-func OTPHeadline(reason state.Reason) string {
+// otpDialogTitle returns the Packxy-branded bold line shown beside the
+// alert icon (NSAlert messageText). The `Packxy — …` prefix mirrors the
+// drop-notification title so the two surfaces feel like the same product;
+// the second clause names the situation in user-level terms (no "pppd",
+// "openfortivpn", "peer reset" — those belong in the watcher log).
+func otpDialogTitle(reason state.Reason) string {
 	switch reason {
 	case state.ReasonAuthExpired:
-		return "Your 2FA token has expired."
+		return "Packxy — 2FA token expired"
 	case state.ReasonNetworkDrop:
-		return "The VPN connection dropped."
+		return "Packxy — VPN connection dropped"
 	case state.ReasonWake:
-		return "Mac woke from sleep — the VPN tunnel was dropped."
+		return "Packxy — Mac woke from sleep"
 	case state.ReasonStartupFailure:
-		return "The VPN failed to start."
+		return "Packxy — VPN failed to start"
 	default:
-		return "The VPN disconnected."
+		return "Packxy — VPN disconnected"
 	}
 }
 
-// otpAction returns the call-to-action line shown below the headline in
-// the dialog. Different drops carry slightly different verbs ("retry"
+// otpDialogDetail returns the smaller-text body shown beneath the title
+// (NSAlert informativeText): an optional explanation followed by the call
+// to action. Different drops carry slightly different verbs ("retry"
 // after a startup failure, "reconnect" otherwise) so the prompt matches
 // the situation.
-func otpAction(reason state.Reason) string {
+func otpDialogDetail(reason state.Reason) string {
+	action := "Enter a fresh 2FA code to reconnect."
+	if reason == state.ReasonStartupFailure {
+		action = "Enter a fresh 2FA code to retry."
+	}
+	// ReasonWake is the only case where the title alone ("Mac woke from
+	// sleep") doesn't tell the full story; spell out the consequence
+	// before the action.
+	if reason == state.ReasonWake {
+		return "The VPN tunnel was dropped.\n\n" + action
+	}
+	return action
+}
+
+// OTPNotificationBody returns the short situation sentence shown as the
+// body of the drop notification — same source of truth as otpDialogTitle
+// (minus the `Packxy — ` brand prefix, since the notification carries the
+// brand in its title).
+func OTPNotificationBody(reason state.Reason) string {
 	switch reason {
+	case state.ReasonAuthExpired:
+		return "2FA token expired."
+	case state.ReasonNetworkDrop:
+		return "VPN connection dropped."
+	case state.ReasonWake:
+		return "Mac woke from sleep — the VPN tunnel was dropped."
 	case state.ReasonStartupFailure:
-		return "Enter a fresh 2FA code to retry."
+		return "VPN failed to start."
 	default:
-		return "Enter a fresh 2FA code to reconnect."
+		return "VPN disconnected."
 	}
 }
 

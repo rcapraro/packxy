@@ -33,11 +33,11 @@ package macnet
 // strdup'd UTF-8 string with the user's input on OK; NULL on Cancel.
 // `out_cancelled` is set non-zero on Cancel.
 //
-// `headline` is rendered as messageText (bold, top of the alert).
-// `action` is rendered as informativeText (smaller, beneath the headline).
+// `title` is rendered as messageText (bold, beside the alert icon).
+// `detail` is rendered as informativeText (smaller, beneath the title).
 //
 // Caller (Go) is responsible for freeing the returned char* via free().
-static char* packxy_prompt_otp(const char* headline, const char* action, int* out_cancelled) {
+static char* packxy_prompt_otp(const char* title, const char* detail, int* out_cancelled) {
     @autoreleasepool {
         // Bootstrap NSApp. finishLaunching is what most "headless" Cocoa
         // tools forget — without it some plumbing (CGS connections,
@@ -50,8 +50,8 @@ static char* packxy_prompt_otp(const char* headline, const char* action, int* ou
 
         NSAlert* alert = [[NSAlert alloc] init];
         alert.alertStyle = NSAlertStyleInformational;
-        alert.messageText = [NSString stringWithUTF8String:headline];
-        alert.informativeText = [NSString stringWithUTF8String:action];
+        alert.messageText = [NSString stringWithUTF8String:title];
+        alert.informativeText = [NSString stringWithUTF8String:detail];
         [alert addButtonWithTitle:@"OK"];
         [alert addButtonWithTitle:@"Cancel"];
 
@@ -97,26 +97,27 @@ import (
 // process running inside the .app bundle for the dialog to be attributed
 // correctly.
 //
-// `headline` becomes the alert's messageText (bold heading); `action` is
-// the informativeText shown beneath. Splitting them mirrors Apple's HIG
-// for alert layout — single-paragraph dialogs look amateurish.
+// `title` becomes the alert's messageText (Packxy-branded bold line
+// beside the icon); `detail` is the informativeText shown beneath.
+// Splitting them mirrors Apple's HIG for alert layout — single-paragraph
+// dialogs look amateurish.
 //
 // Exported (and intended to run in its own short-lived process) because
 // the watcher daemon — being Setsid'd and lacking a Cocoa run loop —
 // can't reliably bring up an NSAlert directly. The watcher therefore
 // spawns `packxy _otpdialog` as a child; that child invokes this
 // function once and exits, giving Cocoa a clean process to work with.
-func CocoaPromptOTP(headline, action string) (string, bool) {
+func CocoaPromptOTP(title, detail string) (string, bool) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
-	cHeadline := C.CString(headline)
-	cAction := C.CString(action)
-	defer C.free(unsafe.Pointer(cHeadline))
-	defer C.free(unsafe.Pointer(cAction))
+	cTitle := C.CString(title)
+	cDetail := C.CString(detail)
+	defer C.free(unsafe.Pointer(cTitle))
+	defer C.free(unsafe.Pointer(cDetail))
 
 	var cancelled C.int
-	cResult := C.packxy_prompt_otp(cHeadline, cAction, &cancelled)
+	cResult := C.packxy_prompt_otp(cTitle, cDetail, &cancelled)
 	if cancelled != 0 {
 		return "", true
 	}

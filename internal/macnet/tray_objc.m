@@ -26,6 +26,7 @@ static NSMenuItem*       g_routes;
 static NSMenuItem*       g_dns;
 static NSMenuItem*       g_lastDrop;
 static NSMenuItem*       g_lastDropSep;
+static NSMenuItem*       g_quit;
 static PackxyTrayDelegate* g_delegate;
 
 // applyState parses the line-oriented blob produced by Go's
@@ -54,14 +55,17 @@ static void applyState(const char* blob) {
         img = [NSImage imageNamed:NSImageNameLockLockedTemplate];
         tip = @"Packxy: connected";
         g_connection.title = @"🟢  Connected";
+        g_quit.title = @"Disconnect & Quit";
     } else if ([state isEqualToString:@"partial"]) {
         img = [NSImage imageNamed:NSImageNameLockUnlockedTemplate];
         tip = @"Packxy: partial";
         g_connection.title = @"🟡  Partial — see status";
+        g_quit.title = @"Disconnect & Quit";
     } else {
         img = [NSImage imageNamed:NSImageNameLockUnlockedTemplate];
         tip = @"Packxy: disconnected";
         g_connection.title = @"🔴  Disconnected";
+        g_quit.title = @"Quit";
     }
     [img setTemplate:YES];
     g_item.button.image = img;
@@ -130,12 +134,12 @@ int run_tray(void) {
 
         [g_menu addItem:[NSMenuItem separatorItem]];
 
-        NSMenuItem* quit = [[NSMenuItem alloc]
+        g_quit = [[NSMenuItem alloc]
             initWithTitle:@"Disconnect & Quit"
                    action:@selector(quit:)
             keyEquivalent:@"q"];
-        [quit setTarget:g_delegate];
-        [g_menu addItem:quit];
+        [g_quit setTarget:g_delegate];
+        [g_menu addItem:g_quit];
 
         g_item.menu = g_menu;
 

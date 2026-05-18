@@ -918,7 +918,7 @@ func runWatcher(_ []string) int {
 		logf("openfortivpn pid %d gone (%s) — notifying user", pid, reason)
 		state.ClearVPNPID()
 		_ = state.WriteLastDrop(time.Now(), reason)
-		_ = macnet.Notify("Packxy — VPN disconnected", macnet.OTPHeadline(reason))
+		_ = macnet.Notify("Packxy — VPN disconnected", macnet.OTPNotificationBody(reason))
 
 		if !reconnectLoop(ctx, logf, reason) {
 			return 0
@@ -1208,8 +1208,8 @@ func stopTray() bool {
 //  _otpdialog (internal, child of the watcher)
 // =====================================================================
 
-// runOTPDialog is invoked by the watcher as `packxy _otpdialog -message
-// <msg>` whenever it needs a fresh OTP. Running the dialog in a separate
+// runOTPDialog is invoked by the watcher as `packxy _otpdialog -title T
+// -detail D` whenever it needs a fresh OTP. Running the dialog in a separate
 // short-lived process — instead of straight from the Setsid'd watcher —
 // gives Cocoa's NSAlert a clean process to bootstrap into, which is what
 // allows the modal window to actually appear on screen.
@@ -1222,16 +1222,16 @@ func stopTray() bool {
 //	exit 1  : internal error (also written to stderr)
 func runOTPDialog(args []string) int {
 	fs := flag.NewFlagSet("_otpdialog", flag.ExitOnError)
-	headline := fs.String("headline", "", "alert headline (messageText)")
-	action := fs.String("action", "", "call to action (informativeText)")
+	title := fs.String("title", "", "alert title — bold line beside the icon (messageText)")
+	detail := fs.String("detail", "", "alert detail — body beneath the title (informativeText)")
 	_ = fs.Parse(args)
 
-	if *headline == "" || *action == "" {
-		fmt.Fprintln(os.Stderr, "_otpdialog: -headline and -action are required")
+	if *title == "" || *detail == "" {
+		fmt.Fprintln(os.Stderr, "_otpdialog: -title and -detail are required")
 		return 1
 	}
 
-	out, cancelled := macnet.CocoaPromptOTP(*headline, *action)
+	out, cancelled := macnet.CocoaPromptOTP(*title, *detail)
 	if cancelled {
 		return 2
 	}
