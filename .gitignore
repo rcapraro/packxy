@@ -1,7 +1,6 @@
 .claude/
 .junie/
-/packxy
-/packxy.app/
 /dist/
 /build/
 /release/
+Packxy/.build/

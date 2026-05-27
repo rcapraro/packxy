@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
-    <string>packxy</string>
+    <string>Packxy</string>
     <key>CFBundleIdentifier</key>
     <string>com.packsolutions.packxy</string>
     <key>CFBundleName</key>
-    <string>packxy</string>
+    <string>Packxy</string>
     <key>CFBundleDisplayName</key>
     <string>Packxy</string>
     <key>CFBundleVersion</key>
@@ -19,10 +19,10 @@
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>
-    <string>11.0</string>
-    <!-- LSUIElement: agent app — no Dock tile, no menu bar, runs purely
-         from the CLI but provides bundle context so notifications and
-         dialogs show the packxy icon instead of the AppleScript icon. -->
+    <string>14.0</string>
+    <!-- LSUIElement: menu-bar agent — no Dock tile, no main window. The
+         app lives entirely in the menu bar; SwiftUI Window scenes open
+         on demand for the Connect / Settings / Installer flows. -->
     <key>LSUIElement</key>
     <true/>
     <key>NSHumanReadableCopyright</key>
