@@ -11,39 +11,14 @@ permissions:
 
 jobs:
   build:
-    name: Build & Vet (macOS)
+    name: Build (macOS, Swift)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
+      - name: Show Swift version
+        run: swift --version
 
-      - name: go vet
-        run: go vet ./...
-
-      # cgo is required (IOKit power-state notifications). The macos-latest
-      # runner ships an Xcode SDK that's universal, so `cc -arch <target>`
-      # cross-compiles to either arm64 or x86_64 from the same host.
-      - name: Build darwin/arm64
-        env:
-          CGO_ENABLED: "1"
-          GOOS: darwin
-          GOARCH: arm64
-          CC: cc -arch arm64
-        run: go build -trimpath -ldflags="-s -w" -o /tmp/packxy-arm64 ./cmd/packxy
-
-      - name: Build darwin/amd64
-        env:
-          CGO_ENABLED: "1"
-          GOOS: darwin
-          GOARCH: amd64
-          CC: cc -arch x86_64
-        run: go build -trimpath -ldflags="-s -w" -o /tmp/packxy-amd64 ./cmd/packxy
-
-      - name: Verify binary architectures
-        run: |
-          file /tmp/packxy-arm64
-          file /tmp/packxy-amd64
+      - name: swift build
+        working-directory: Packxy
+        run: swift build -c release

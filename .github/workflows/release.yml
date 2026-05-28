@@ -10,57 +10,38 @@ permissions:
 
 jobs:
   release:
-    name: Build & Publish (macOS .app universal)
+    name: Build & Publish (macOS .app, arm64)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
 
       - name: Resolve version
         id: ver
         run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
 
-      - name: Build universal .app
-        # `make app-universal` regenerates the icon, builds darwin/arm64 +
-        # darwin/amd64 with cgo, lipos them into a fat binary, fans the icon
-        # out to a multi-resolution iconset, and ad-hoc signs the bundle.
-        # All the cross-compile env (CGO_ENABLED, CC=cc -arch ...) lives in
-        # the Makefile so the CI step is just `make`.
-        run: make app-universal VERSION="${{ steps.ver.outputs.version }}"
+      - name: Build Packxy.app
+        # `make build` runs `swift build -c release`, then wraps the
+        # executable into dist/Packxy.app (Info.plist with VERSION
+        # interpolated + multi-resolution AppIcon.icns + ad-hoc
+        # codesign). macos-latest is arm64, so the binary is arm64.
+        run: make build VERSION="${{ steps.ver.outputs.version }}"
 
       - name: Inspect bundle
         run: |
-          file dist/packxy.app/Contents/MacOS/packxy
-          codesign -dv dist/packxy.app
-          plutil -p dist/packxy.app/Contents/Info.plist | head -20
+          file dist/Packxy.app/Contents/MacOS/Packxy
+          codesign -dv dist/Packxy.app
+          plutil -p dist/Packxy.app/Contents/Info.plist | head -20
 
-      - name: Package release archives
+      - name: Package release archive
         run: |
           V="${{ steps.ver.outputs.version }}"
           mkdir -p release
-          # The .app archive — primary download for end users.
-          tar -C dist -czf "release/packxy-${V}-darwin-universal.app.tar.gz" \
-            packxy.app
-          # Bare arch-specific binaries for users who don't want the bundle
-          # (or want to integrate without /Applications). Include README +
-          # config template so the tarball is self-contained.
-          for arch in arm64 amd64; do
-            stage="release/stage-${arch}"
-            mkdir -p "${stage}"
-            cp "dist/packxy-${arch}" "${stage}/packxy"
-            cp README.md "${stage}/"
-            cp internal/envcfg/packxy.conf.sample "${stage}/"
-            tar -czf "release/packxy-${V}-darwin-${arch}.tar.gz" -C "${stage}" .
-          done
+          tar -C dist -czf "release/Packxy-${V}-darwin-arm64.app.tar.gz" \
+            Packxy.app
 
       - name: Generate checksums
         working-directory: release
         run: |
-          rm -rf stage-arm64 stage-amd64
           shasum -a 256 *.tar.gz > checksums.txt
           cat checksums.txt
 
@@ -75,22 +56,24 @@ jobs:
           body: |
             ## Installation
 
-            **Recommended — universal `.app` bundle (Apple Silicon + Intel):**
+            **macOS 14+ on Apple Silicon.**
 
             ```bash
-            curl -L -O https://github.com/${{ github.repository }}/releases/download/${{ steps.ver.outputs.version }}/packxy-${{ steps.ver.outputs.version }}-darwin-universal.app.tar.gz
-            tar -xzf packxy-*-darwin-universal.app.tar.gz
-            ./packxy.app/Contents/MacOS/packxy install
+            curl -L -O https://github.com/${{ github.repository }}/releases/download/${{ steps.ver.outputs.version }}/Packxy-${{ steps.ver.outputs.version }}-darwin-arm64.app.tar.gz
+            tar -xzf Packxy-*-darwin-arm64.app.tar.gz
+            mv Packxy.app /Applications/
+            open /Applications/Packxy.app
             ```
 
-            `packxy install` copies the bundle to `/Applications/packxy.app` and symlinks the CLI to `/usr/local/bin/packxy`. After that you can call `packxy` directly from the terminal.
+            On first launch, click the Packxy menu-bar icon →
+            **Settings… → Installation → Install…**. macOS prompts for
+            your admin password to write `/etc/sudoers.d/packxy` and
+            `/etc/ppp/peers/packxy`, then seeds `~/.config/packxy.conf`.
+            Fill in **Connection** and **Split tunneling**, save, and
+            click **Connect…** from the menu bar.
 
-            **Configure** `~/.config/packxy.conf` — `packxy install` drops a starter template there (see [`packxy.conf.sample`](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/internal/envcfg/packxy.conf.sample)). Then connect:
-            ```bash
-            packxy start
-            ```
-
-            See the [README](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md) for the full guide.
+            See the [README](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md)
+            for the full guide.
 
             ## Verify download
             ```bash
