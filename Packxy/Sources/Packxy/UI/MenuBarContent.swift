@@ -154,25 +154,26 @@ struct MenuBarContent: View {
     private var actionSection: some View {
         let s = connectionManager.state
         let configReady = appState.config.hasMinimumCredentials
+        // macOS doesn't show `.help` tooltips on disabled buttons, so
+        // a visible row is the only way to tell the user why
+        // Connect… / Reconnect… is grayed out. Sits *above* the action
+        // so the eye lands on the cause before the (inert) button.
+        if needsConfigWarning(state: s, configReady: configReady) {
+            Text("⚠ Set host / username / password in Settings.")
+                .foregroundStyle(.orange)
+        }
         switch s {
         case .disconnected:
             Button("Connect…") { showConnectionWindow() }
                 .keyboardShortcut("k")
                 // Disable when host/user/password aren't all set —
                 // opening the OTP form would only lead to a guaranteed
-                // failure at submission. The Settings tooltip guides
-                // the user to the right place.
+                // failure at submission.
                 .disabled(!configReady)
-                .help(configReady
-                      ? ""
-                      : "Set host / username / password in Settings → Connection first.")
         case .dropped:
             Button("Reconnect…") { showConnectionWindow() }
                 .keyboardShortcut("r")
                 .disabled(!configReady)
-                .help(configReady
-                      ? ""
-                      : "Set host / username / password in Settings → Connection first.")
         case .connecting, .reconnecting:
             Button("Show progress…") { showConnectionWindow() }
         case .connected:
@@ -185,14 +186,31 @@ struct MenuBarContent: View {
         }
     }
 
+    /// True only when the user *could* try to (re)connect but is
+    /// blocked by missing credentials — `.connecting` / `.connected`
+    /// / `.authLocked` have no Connect button to gate, so the warning
+    /// would be noise.
+    private func needsConfigWarning(state: ConnectionState, configReady: Bool) -> Bool {
+        guard !configReady else { return false }
+        switch state {
+        case .disconnected, .dropped: return true
+        default: return false
+        }
+    }
+
     /// Brings Packxy to the foreground BEFORE opening the connection
     /// window. Without the explicit activate, SwiftUI's
     /// `openWindow(id:)` reliably *creates* the window but doesn't
     /// always pull the agent app forward — the user clicks
     /// "Reconnect…" and the window appears behind their browser, the
     /// menu closes, and from their POV "nothing happens".
+    ///
+    /// `activate(ignoringOtherApps: true)` is deprecated in macOS 14
+    /// but its replacement `activate()` does NOT pull an LSUIElement
+    /// agent app forward — the deprecation is API-only; the behavior
+    /// is still what we need.
     private func showConnectionWindow() {
-        NSApp.activate()
+        NSApp.activate(ignoringOtherApps: true)
         openWindow(id: WindowID.connection)
     }
 }

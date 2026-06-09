@@ -21,6 +21,7 @@ struct EditableList: View {
 
     @State private var pending: String = ""
     @State private var pendingError: String?
+    @FocusState private var addFieldFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -45,10 +46,16 @@ struct EditableList: View {
                         Button {
                             items.remove(at: idx)
                         } label: {
+                            // Larger hit target than the bare 14pt
+                            // icon, and a stronger color than
+                            // .secondary so the destructive intent
+                            // reads at a glance.
                             Image(systemName: "minus.circle.fill")
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.red.opacity(0.85))
+                                .contentShape(Rectangle())
+                                .frame(width: 22, height: 22)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.borderless)
                         .help("Remove")
                     }
                     .padding(.vertical, 3)
@@ -67,6 +74,7 @@ struct EditableList: View {
                 TextField("", text: $pending, prompt: Text(placeholder))
                     .font(.system(.body, design: .monospaced))
                     .textFieldStyle(.roundedBorder)
+                    .focused($addFieldFocused)
                     .onSubmit { tryAdd() }
                 Button {
                     tryAdd()
@@ -79,9 +87,17 @@ struct EditableList: View {
             }
 
             if let err = pendingError {
-                Text(err)
-                    .font(.callout)
-                    .foregroundStyle(.red)
+                // Icon + leading padding align the message with the
+                // TextField's text baseline (the .roundedBorder field
+                // has ~4pt internal inset). Matches the warning
+                // styling used in ConnectionWindow's driver error row.
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                    Text(err)
+                }
+                .font(.callout)
+                .foregroundStyle(.red)
+                .padding(.leading, 4)
             }
         }
     }
@@ -100,5 +116,9 @@ struct EditableList: View {
         items.append(value)
         pending = ""
         pendingError = nil
+        // Keep focus on the add field so the user can rapid-fire add
+        // multiple entries (Cmd+Tab focus loss after submit is the
+        // default and breaks the natural typing flow).
+        addFieldFocused = true
     }
 }

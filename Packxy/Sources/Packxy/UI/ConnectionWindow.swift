@@ -33,16 +33,32 @@ struct ConnectionWindow: View {
         VStack(alignment: .leading, spacing: 12) {
             header
             content
+                // `.id(stateID)` forces SwiftUI to treat each state's
+                // content as a distinct view, which is what makes the
+                // `.transition` below actually fire on swap — without
+                // it, the @ViewBuilder switch can be folded into the
+                // same identity and `.move(edge: .top)` is silently
+                // dropped.
+                .id(stateID)
                 .transition(.opacity.combined(with: .move(edge: .top)))
+                // Animation scoped to `content` only: header and
+                // footer change shape between states (e.g. 2-button
+                // footer → 1-button footer → 2-button footer) and
+                // animating those translates buttons sideways, which
+                // reads as a jitter. Cross-fading only the form /
+                // spinner / confirmation gives a clean transition.
+                .animation(.easeInOut(duration: 0.18), value: stateID)
             Spacer(minLength: 0)
             footer
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        // OTP / status / confirmation all fit in 340pt. maxHeight
-        // bounds vertical growth so a multi-line `lastError` dump
-        // can't push the footer off-screen.
-        .frame(minWidth: 340, minHeight: 220, maxHeight: 480)
+        // Only the lower bound: the driver-error row carries its own
+        // bounded ScrollView now, so we don't need a global maxHeight
+        // to keep the footer on-screen — and dropping it lets the
+        // user grow the window if they really want to inspect a long
+        // error without the inner scroll.
+        .frame(minWidth: 340, minHeight: 220)
         // Re-focus the OTP field whenever the state flips back to an
         // input form — covers the "OTP rejected, try again" path
         // where the user expects the cursor to land where they were
@@ -53,8 +69,14 @@ struct ConnectionWindow: View {
             default: break
             }
         }
-        .onAppear { otpFocused = true }
-        .animation(.easeInOut(duration: 0.18), value: stateID)
+        // Menu-bar agents (LSUIElement=YES) don't activate when one of
+        // their windows opens — without this, the Connect window shows
+        // up behind whatever app had focus when the user clicked the
+        // menu-bar item, and the OTP field never gets keyboard input.
+        .onAppear {
+            NSApp.activate()
+            otpFocused = true
+        }
     }
 
     /// String key derived from ConnectionState — used to drive
@@ -167,6 +189,11 @@ struct ConnectionWindow: View {
             TextField("2FA code", text: $otp, prompt: Text("123456"))
                 .textFieldStyle(.roundedBorder)
                 .font(.system(.title2, design: .monospaced))
+                // 6 monospaced title2 digits + roundedBorder padding
+                // ≈ 160pt; 200pt gives a comfortable margin without
+                // sprawling across the full window width when the
+                // user resizes it.
+                .frame(maxWidth: 200, alignment: .leading)
                 .focused($otpFocused)
                 .onSubmit { Task { await submit() } }
                 // Strip non-digit characters as the user types, and
@@ -187,16 +214,26 @@ struct ConnectionWindow: View {
             // distinctly from a self-validation error — the warning
             // triangle signals "this is a system error from the
             // driver" rather than something the user typed wrong.
-            if case .dropped = connectionManager.state,
-               let driverError = connectionManager.lastError {
+            // No longer gated on `.dropped`: a failed `start()` can
+            // land us back in `.disconnected` with `lastError` set,
+            // and silently swallowing it leaves the user staring at a
+            // blank form wondering why nothing happened.
+            if let driverError = connectionManager.lastError {
                 HStack(alignment: .top, spacing: 6) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(.red)
-                    Text(driverError)
-                        .font(.callout)
-                        .foregroundStyle(.red)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
+                    // ScrollView caps the visual footprint of long
+                    // openfortivpn / sudo stack-traces — without it
+                    // the parent's maxHeight silently chops the
+                    // overflow off, hiding the tail of the error.
+                    ScrollView {
+                        Text(driverError)
+                            .font(.callout)
+                            .foregroundStyle(.red)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 120)
                 }
             }
         }

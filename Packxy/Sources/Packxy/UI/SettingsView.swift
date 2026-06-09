@@ -4,10 +4,18 @@
 //
 // Layout:
 //
-//   NavigationSplitView
-//     ├─ Sidebar (grouped sections, version footer)
-//     └─ Detail pane (Form, scrolls if content overflows)
-//   GlobalActionBar (sticky bottom — dirty indicator + Revert + Save)
+//   HStack
+//     ├─ Sidebar (top inset for traffic lights, grouped list, footer)
+//     └─ Detail column
+//          ├─ Title bar (centred section name + divider)
+//          ├─ Form (scrolls silently if content overflows)
+//          └─ Action bar (sticky — dirty dot + Revert + Save)
+//
+// We use a hand-rolled HStack rather than NavigationSplitView because
+// the Settings scene's window has no real toolbar — NavigationSplitView
+// adds a sidebar-toggle button there that no SwiftUI modifier reliably
+// removes, and its sidebar column extends behind the traffic lights
+// without giving us a hook to inset the content below them.
 //
 // The action bar lives at the SettingsView root rather than inside each
 // pane so the dirty indicator + Save/Revert buttons are visible no
@@ -16,6 +24,17 @@
 import AppKit
 import ServiceManagement
 import SwiftUI
+
+/// Field width budget shared by the Settings panes. Picked so
+/// identifiers (hostnames, usernames, realms) get ~30 characters of
+/// monospace room, IPv4 addresses get enough for `255.255.255.255`,
+/// and ports stop pretending they need more than 5 digits.
+private enum FieldWidth {
+    static let host: CGFloat = 280
+    static let credential: CGFloat = 280
+    static let port: CGFloat = 80
+    static let ip: CGFloat = 140
+}
 
 private enum SettingsSection: String, CaseIterable, Identifiable {
     case general, installation, connection, splitTunneling
@@ -58,12 +77,15 @@ struct SettingsView: View {
     @State private var saveError: String?
 
     var body: some View {
-        NavigationSplitView {
+        HStack(spacing: 0) {
             sidebar
-        } detail: {
+                .frame(width: 188)
+                .background(.regularMaterial)
+            Divider()
             VStack(spacing: 0) {
+                paneTitleBar
                 detailPane
-                    .navigationTitle(selection.label)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 // Save bar lives at window level (not per-pane) so the
                 // dirty dot + Save / Revert stay visible while the
                 // user hops between Connection and Split tunneling.
@@ -74,19 +96,24 @@ struct SettingsView: View {
                 }
             }
         }
-        // The default NavigationSplitView ships a sidebar-collapse
-        // button. In a Settings window (which has no real toolbar) it
-        // floats as a stray control at the top of the sidebar — not
-        // the look we want. The sidebar is always useful here, so
-        // removing the toggle entirely is the right call.
-        .toolbar(removing: .sidebarToggle)
-        .frame(minWidth: 640, minHeight: 440)
+        .frame(minWidth: 760, minHeight: 680)
+        // Menu-bar agents (LSUIElement=YES) don't activate when one of
+        // their windows opens — Settings shows up behind whatever app
+        // had focus when the user clicked the menu-bar item. Force
+        // activation so the window comes to the front and accepts
+        // keyboard input on first appearance.
+        .onAppear { NSApp.activate() }
     }
 
     // MARK: - Sidebar
 
     private var sidebar: some View {
         VStack(spacing: 0) {
+            // Clear the traffic-light row so the first section header
+            // isn't visually obscured by the red/yellow/green buttons.
+            // 28pt matches the standard macOS title-bar height.
+            Color.clear.frame(height: 28)
+
             List(selection: $selection) {
                 Section("App") {
                     row(.general)
@@ -100,6 +127,8 @@ struct SettingsView: View {
                 }
             }
             .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
+            .scrollIndicators(.never)
 
             Spacer(minLength: 0)
 
@@ -118,7 +147,6 @@ struct SettingsView: View {
             .padding(.vertical, 6)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 240)
     }
 
     private func row(_ section: SettingsSection) -> some View {
@@ -133,6 +161,19 @@ struct SettingsView: View {
     }
 
     // MARK: - Detail
+
+    // Centred section title across the top of the detail column. Replaces
+    // NavigationSplitView's `.navigationTitle`, which we lost when we
+    // dropped that container.
+    private var paneTitleBar: some View {
+        ZStack {
+            Text(selection.label)
+                .font(.headline)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 10)
+        .overlay(alignment: .bottom) { Divider() }
+    }
 
     @ViewBuilder
     private var detailPane: some View {
@@ -167,17 +208,24 @@ struct SettingsView: View {
             }
 
             HStack(spacing: 10) {
-                // Minimal dirty indicator: an orange dot instead of
-                // verbose "Unsaved changes" text. The disabled/enabled
-                // state of Save & Revert already signals editability
-                // to anyone who scans the bar.
-                if appState.isDirty {
-                    Circle()
-                        .fill(.orange)
-                        .frame(width: 7, height: 7)
-                        .accessibilityLabel("Unsaved changes")
-                }
                 Spacer()
+                // Dirty indicator: an orange dot + short label,
+                // glued to the Revert button rather than stranded
+                // across a Spacer where the eye doesn't see it. The
+                // label keeps the signal legible even when the bar
+                // is scanned in peripheral vision.
+                if appState.isDirty {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(.orange)
+                            .frame(width: 9, height: 9)
+                        Text("Unsaved")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Unsaved changes")
+                }
                 Button("Revert") {
                     appState.revertConfig()
                     saveError = nil
@@ -198,7 +246,10 @@ struct SettingsView: View {
                 .buttonStyle(.borderedProminent)
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 8)
+            // 10pt vertical gives macOS-standard breathing room
+            // around the bordered buttons — 8pt felt cramped against
+            // the Divider overlay and the bar's tinted background.
+            .padding(.vertical, 10)
         }
         .background(.bar)
         .overlay(alignment: .top) {
@@ -262,6 +313,8 @@ private struct GeneralPane: View {
             }
         }
         .formStyle(.grouped)
+        .scrollIndicators(.never)
+        .padding(.trailing, 4)
         .onAppear { refresh() }
         // SMAppService doesn't fire a publisher when status changes
         // (e.g. user confirms in System Settings). Refreshing on app
@@ -312,11 +365,13 @@ private struct ConnectionPane: View {
                     TextField("", text: $appState.config.host,
                               prompt: Text("vpn.example.com"))
                         .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: FieldWidth.host)
                 }
                 LabeledContent("Port") {
                     TextField("", text: $appState.config.port,
                               prompt: Text("443"))
                         .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: FieldWidth.port)
                 }
             } header: {
                 Text("Gateway")
@@ -330,6 +385,7 @@ private struct ConnectionPane: View {
                     TextField("", text: $appState.config.user,
                               prompt: Text("jdoe"))
                         .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: FieldWidth.credential)
                 }
                 // SecureField rendered with a bordered box (same as
                 // the username row) so users can tell at a glance the
@@ -362,6 +418,7 @@ private struct ConnectionPane: View {
                         .accessibilityLabel(showPassword ? "Hide password" : "Show password")
                         .help(showPassword ? "Hide password" : "Show password")
                     }
+                    .frame(maxWidth: FieldWidth.credential)
                 }
             } header: {
                 Text("Credentials")
@@ -373,10 +430,8 @@ private struct ConnectionPane: View {
             Section("Advanced") {
                 // SHA-256 fingerprints are 64 hex chars — let the field
                 // grow vertically so the user sees the full value at
-                // narrow widths. Using the standard label+prompt form
-                // (rather than LabeledContent + bare TextField) avoids
-                // the Form .grouped style mis-placing the TextField's
-                // label to the right of the wrapped value.
+                // narrow widths. No maxWidth here: this is the one
+                // field that genuinely benefits from the full column.
                 LabeledContent("Trusted cert") {
                     TextField("", text: $appState.config.trustedCert,
                               prompt: Text("sha256 fingerprint"),
@@ -389,16 +444,29 @@ private struct ConnectionPane: View {
                     TextField("", text: $appState.config.realm,
                               prompt: Text("optional FortiGate realm"))
                         .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: FieldWidth.credential)
                 }
-                Toggle("Disable FTM push", isOn: $appState.config.noFTMPush)
+                // Wrapped in LabeledContent so the switch sits in the
+                // value column like every other row, instead of the
+                // Toggle's default "label glued to switch on the
+                // right" layout which would break the grid. Label
+                // matches the binding semantics: switch ON means the
+                // user wants to *disable* FTM push (noFTMPush = true).
+                LabeledContent("Disable FTM push") {
+                    Toggle("", isOn: $appState.config.noFTMPush)
+                        .labelsHidden()
+                }
                 LabeledContent("OTP prompt override") {
                     TextField("", text: $appState.config.otpPrompt,
                               prompt: Text("substring openfortivpn matches"))
                         .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: FieldWidth.credential)
                 }
             }
         }
         .formStyle(.grouped)
+        .scrollIndicators(.never)
+        .padding(.trailing, 4)
     }
 }
 
@@ -428,6 +496,7 @@ private struct SplitTunnelingPane: View {
                               prompt: Text("10.0.0.1"))
                         .font(.system(.body, design: .monospaced))
                         .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: FieldWidth.ip)
                 }
                 EditableList(
                     items: $appState.config.vpnDomains,
@@ -443,6 +512,8 @@ private struct SplitTunnelingPane: View {
             }
         }
         .formStyle(.grouped)
+        .scrollIndicators(.never)
+        .padding(.trailing, 4)
     }
 
     private func validateCIDR(_ value: String) -> String? {
@@ -547,6 +618,8 @@ private struct InstallationPane: View {
             }
         }
         .formStyle(.grouped)
+        .scrollIndicators(.never)
+        .padding(.trailing, 4)
     }
 
     @ViewBuilder

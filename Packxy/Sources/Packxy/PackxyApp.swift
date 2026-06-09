@@ -22,15 +22,13 @@ struct PackxyApp: App {
                 .environmentObject(appState)
                 .environmentObject(appState.connectionManager)
         } label: {
-            // SwiftUI's MenuBarExtra renders Images at a smaller font
-            // size than the AppKit menu-bar icons Apple ships (Wi-Fi,
-            // Battery, Volume — all ~18pt tall). Setting an explicit
-            // 18pt font on the SF Symbol matches that height, and
-            // `.medium` weight keeps the thin half-shield outline
-            // readable at that scale.
-            Image(systemName: menuBarIcon)
-                .font(.system(size: 18, weight: .medium))
-                .accessibilityLabel("Packxy")
+            // Wrapped in a dedicated view so the label re-renders on
+            // both `appState.isInstalled` AND `connectionManager.state`
+            // changes — the latter lives on a separate ObservableObject
+            // that PackxyApp itself doesn't observe directly.
+            MenuBarLabel()
+                .environmentObject(appState)
+                .environmentObject(appState.connectionManager)
         }
         .menuBarExtraStyle(.menu)
 
@@ -49,7 +47,17 @@ struct PackxyApp: App {
                 .environmentObject(appState)
                 .environmentObject(appState.connectionManager)
         }
-        .windowResizability(.contentSize)
+        // `.contentMinSize` (not `.contentSize`) so the view's frame
+        // sets only the *minimum* — the user can grow the window if
+        // they want more room for a long `lastError`, and `defaultSize`
+        // actually takes effect on first open (under `.contentSize` it
+        // would be ignored in favor of the view's intrinsic size).
+        .windowResizability(.contentMinSize)
+        // Pin the initial size so the window opens consistently
+        // regardless of the connection state at open time — without
+        // this, a `.dropped` with a long `lastError` opens fatter than
+        // a fresh `.disconnected`.
+        .defaultSize(width: 360, height: 280)
         // Centre on the main display on first open. Without this,
         // SwiftUI tends to plonk single-instance Windows at the top
         // edge of whatever display the user last clicked from — fine
@@ -57,12 +65,38 @@ struct PackxyApp: App {
         // setups when the menu-bar icon lives on a non-main display.
         .defaultPosition(.center)
     }
+}
 
-    private var menuBarIcon: String {
-        // Match the Settings sidebar footer for brand consistency: the
-        // half-filled shield is the Packxy mark. The warning variant
-        // keeps the same silhouette so the icon's location in the menu
-        // bar doesn't shift when install status flips.
-        appState.isInstalled ? "shield.lefthalf.filled" : "exclamationmark.shield.fill"
+/// Menu-bar icon that mirrors the connection state at a glance, the
+/// same way Wi-Fi / Bluetooth do. Keeps the shield silhouette across
+/// states so the icon's pixel footprint in the menu bar doesn't shift.
+private struct MenuBarLabel: View {
+    @EnvironmentObject var appState: AppState
+    @EnvironmentObject var connectionManager: ConnectionManager
+
+    var body: some View {
+        // SwiftUI's MenuBarExtra renders Images at a smaller font size
+        // than the AppKit menu-bar icons Apple ships (Wi-Fi, Battery,
+        // Volume — all ~18pt tall). 18pt + `.medium` weight matches.
+        Image(systemName: iconName)
+            .font(.system(size: 18, weight: .medium))
+            .accessibilityLabel("Packxy")
+    }
+
+    private var iconName: String {
+        // Install failure trumps everything: if the user can't connect
+        // at all, that's what the icon should communicate.
+        guard appState.isInstalled else { return "exclamationmark.shield.fill" }
+        // Switch on the concrete state (not just the indicator) so a
+        // freshly-launched `.disconnected` reads as "neutral / idle"
+        // (outline shield), while a `.dropped` reads as "something
+        // went wrong" (slashed shield). Folding both into the same
+        // `.bad` icon was alarming on first launch.
+        switch connectionManager.state {
+        case .connected:                  return "shield.lefthalf.filled" // Packxy mark
+        case .connecting, .reconnecting:  return "ellipsis.shield.fill"
+        case .disconnected:               return "shield"                 // neutral / off
+        case .dropped, .authLocked:       return "shield.slash.fill"      // error / blocked
+        }
     }
 }

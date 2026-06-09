@@ -131,9 +131,10 @@ CLT 15.3 or later), and `openfortivpn` from Homebrew:
 
 ```sh
 brew install openfortivpn
-make build      # → dist/Packxy.app (ad-hoc signed)
-make run        # build + open the app
-make clean      # remove dist/, build/, Packxy/.build/
+make build                          # → dist/Packxy.app (ad-hoc signed)
+cp -R dist/Packxy.app /Applications/ # install into /Applications
+make run                            # build + open the app
+make clean                          # remove dist/, build/, Packxy/.build/
 ```
 
 The Makefile uses `swift build` (SPM) to compile the executable and a
