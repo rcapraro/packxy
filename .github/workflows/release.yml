@@ -17,7 +17,14 @@ jobs:
 
       - name: Resolve version
         id: ver
-        run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+        # `tag` keeps the leading `v` for archive names and download URLs
+        # (existing releases follow that convention). `version` strips it
+        # so CFBundleShortVersionString is a bare semver — SwiftUI adds
+        # the visual `v` prefix on its own, and a `v`-prefixed plist
+        # value would render as `vv3.1.0`.
+        run: |
+          echo "tag=${GITHUB_REF_NAME}"       >> "$GITHUB_OUTPUT"
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Build Packxy.app
         # `make build` runs `swift build -c release`, then wraps the
@@ -34,7 +41,7 @@ jobs:
 
       - name: Package release archive
         run: |
-          V="${{ steps.ver.outputs.version }}"
+          V="${{ steps.ver.outputs.tag }}"
           mkdir -p release
           tar -C dist -czf "release/Packxy-${V}-darwin-arm64.app.tar.gz" \
             Packxy.app
@@ -59,7 +66,7 @@ jobs:
             **macOS 14+ on Apple Silicon.**
 
             ```bash
-            curl -L -O https://github.com/${{ github.repository }}/releases/download/${{ steps.ver.outputs.version }}/Packxy-${{ steps.ver.outputs.version }}-darwin-arm64.app.tar.gz
+            curl -L -O https://github.com/${{ github.repository }}/releases/download/${{ steps.ver.outputs.tag }}/Packxy-${{ steps.ver.outputs.tag }}-darwin-arm64.app.tar.gz
             tar -xzf Packxy-*-darwin-arm64.app.tar.gz
             mv Packxy.app /Applications/
             open /Applications/Packxy.app

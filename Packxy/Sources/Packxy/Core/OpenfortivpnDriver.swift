@@ -4,14 +4,17 @@
 //   1. writeConfig writes /tmp/packxy/openfortivpn.conf with the
 //      user's credentials + the OTP (overwriting any previous file).
 //   2. start() spawns `sudo -n openfortivpn -c <conf>
-//      --pppd-call=packxy --persistent=0`, redirecting stdout/stderr
-//      into /tmp/packxy/openfortivpn.log.
+//      --pppd-call=packxy --persistent=0`, capturing stdout/stderr
+//      through a Pipe that tees each chunk to
+//      /tmp/packxy/openfortivpn.log AND yields complete lines on an
+//      AsyncStream the caller can subscribe to for live progress.
 //   3. start() polls ifconfig(ppp0) until an IPv4 appears or the
 //      process exits early. While polling it also scans the log for
 //      auth-error markers so an obviously-doomed connection can be
 //      aborted before the 40s ceiling.
 //   4. The caller (ConnectionManager) wires up `terminationHandler`
-//      on the returned Process to react to drops.
+//      on the returned Process to react to drops, and drains
+//      `driverOutput` to surface openfortivpn's chatter to the UI.
 //
 // Stop is decoupled: callers SIGTERM via `pkill openfortivpn` because
 // the process may outlive the Process handle (e.g. if the app
@@ -42,6 +45,21 @@ enum OpenfortivpnDriverError: LocalizedError {
 struct OpenfortivpnConnection {
     let process: Process
     let ip: String
+    /// Lines (without trailing \n) streamed from the child's merged
+    /// stdout+stderr for the lifetime of the process. The stream
+    /// finishes when the pipe sees EOF — i.e. when openfortivpn exits.
+    /// Buffered to the most recent ~500 lines so a long-lived
+    /// connection with a slow consumer (or no consumer at all) can't
+    /// grow unbounded.
+    let driverOutput: AsyncStream<String>
+}
+
+/// Mutable scratch box for the line-splitting buffer captured by
+/// the pipe's readabilityHandler. A `var Data` declared in the
+/// enclosing scope would also work via box-capture, but a class
+/// makes the cross-invocation state visible at a glance.
+private final class DriverLineBuffer {
+    var data = Data()
 }
 
 enum OpenfortivpnDriver {
@@ -95,11 +113,54 @@ enum OpenfortivpnDriver {
                 "could not open \(logPath) for writing"
             )
         }
-        // The Process dup's the FD into the child at run() time, so
-        // we can close our copy whether run() succeeded or threw —
-        // either way, we don't want to hold a parent-side FD past
-        // this function.
-        defer { try? logHandle.close() }
+
+        // Capture stdout+stderr through a single Pipe (both stdio
+        // streams of the child dup to the same write end) so we can:
+        //   1. tee each chunk to /tmp/packxy/openfortivpn.log,
+        //      preserving the post-mortem log file and keeping
+        //      logContainsAuthError() / classifyExitReason() working.
+        //   2. split chunks into complete \n-terminated lines and
+        //      surface them via an AsyncStream the caller drains for
+        //      live progress in the connect window.
+        // logHandle's lifetime now extends past this function — the
+        // readabilityHandler owns it and closes it on EOF.
+        let outPipe = Pipe()
+        let (driverOutput, continuation) = AsyncStream<String>.makeStream(
+            bufferingPolicy: .bufferingNewest(500)
+        )
+        let buffer = DriverLineBuffer()
+        outPipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty {
+                // EOF — flush a trailing partial line if any, then
+                // tear down. Both finish() and onTermination are
+                // idempotent so the throw paths below can also call
+                // finish() without worrying about double-close.
+                if !buffer.data.isEmpty,
+                   let tail = String(data: buffer.data, encoding: .utf8),
+                   !tail.isEmpty {
+                    continuation.yield(tail)
+                }
+                buffer.data.removeAll()
+                try? logHandle.close()
+                handle.readabilityHandler = nil
+                continuation.finish()
+                return
+            }
+            try? logHandle.write(contentsOf: chunk)
+            buffer.data.append(chunk)
+            while let nl = buffer.data.firstIndex(of: 0x0A) {
+                let lineData = buffer.data[buffer.data.startIndex..<nl]
+                buffer.data.removeSubrange(buffer.data.startIndex...nl)
+                if let line = String(data: Data(lineData), encoding: .utf8) {
+                    continuation.yield(line)
+                }
+            }
+        }
+        continuation.onTermination = { _ in
+            outPipe.fileHandleForReading.readabilityHandler = nil
+            try? logHandle.close()
+        }
 
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
@@ -111,12 +172,13 @@ enum OpenfortivpnDriver {
         if config.noFTMPush {
             task.arguments?.append("--no-ftm-push")
         }
-        task.standardOutput = logHandle
-        task.standardError = logHandle
+        task.standardOutput = outPipe
+        task.standardError = outPipe
 
         do {
             try task.run()
         } catch {
+            continuation.finish()
             throw OpenfortivpnDriverError.launchFailed(error.localizedDescription)
         }
 
@@ -128,20 +190,26 @@ enum OpenfortivpnDriver {
                 // Process gave up before we saw an IP. Read the log
                 // to surface a meaningful error.
                 let tail = readLog().split(separator: "\n").suffix(5).joined(separator: "\n")
+                continuation.finish()
                 throw OpenfortivpnDriverError.exitedEarly(stderr: tail)
             }
             if logContainsAuthError() {
                 // Kill the doomed process so we don't pile auth
-                // attempts against the FortiGate.
+                // attempts against the FortiGate. stop() will EOF the
+                // pipe and the readabilityHandler finishes the stream;
+                // don't double-finish here.
                 stop()
                 throw OpenfortivpnDriverError.authError
             }
             if let ip = NetworkConfig.interfaceIPv4("ppp0") {
-                return OpenfortivpnConnection(process: task, ip: ip)
+                return OpenfortivpnConnection(
+                    process: task, ip: ip, driverOutput: driverOutput
+                )
             }
             try await Task.sleep(nanoseconds: 500_000_000)
         }
-        // Timed out. Kill the half-up process.
+        // Timed out. Kill the half-up process. Same finish() reasoning
+        // as the authError path.
         stop()
         throw OpenfortivpnDriverError.timeout
     }

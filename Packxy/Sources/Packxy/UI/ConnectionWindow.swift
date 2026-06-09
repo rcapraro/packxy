@@ -7,9 +7,13 @@
 //   • .dropped(reason, _)      → "Reconnect" form titled with the
 //                                reason's dialogTitle/Detail so the
 //                                narrative matches the drop notif.
-//   • .connecting/.reconnecting → progress spinner.
-//   • .connected               → brief success confirmation (live
-//                                status lives in the menu bar).
+//   • .connecting/.reconnecting → progress spinner + live activity
+//                                log so the user can see what's
+//                                actually happening (sudo, ppp0,
+//                                routes, resolvers).
+//   • .connected               → success confirmation + the log
+//                                from the attempt; window stays
+//                                open until the user clicks Close.
 //   • .authLocked              → call-to-action to bail out.
 //
 // The window auto-focuses the OTP field on appear and on state
@@ -48,7 +52,13 @@ struct ConnectionWindow: View {
                 // reads as a jitter. Cross-fading only the form /
                 // spinner / confirmation gives a clean transition.
                 .animation(.easeInOut(duration: 0.18), value: stateID)
-            Spacer(minLength: 0)
+                // Let `content` claim all the vertical slack between
+                // header and footer so the inner LogView can grow
+                // when the user resizes the window taller.
+                // `.topLeading` keeps states without a log
+                // (`.authLocked`, an empty form) anchored to the top
+                // instead of drifting to the vertical centre.
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             footer
         }
         .padding(.horizontal, 14)
@@ -57,8 +67,10 @@ struct ConnectionWindow: View {
         // bounded ScrollView now, so we don't need a global maxHeight
         // to keep the footer on-screen — and dropping it lets the
         // user grow the window if they really want to inspect a long
-        // error without the inner scroll.
-        .frame(minWidth: 340, minHeight: 220)
+        // error without the inner scroll. minHeight is generous
+        // enough to give the connect/reconnect log view reasonable
+        // default room without forcing an immediate resize.
+        .frame(minWidth: 440, minHeight: 280)
         // Re-focus the OTP field whenever the state flips back to an
         // input form — covers the "OTP rejected, try again" path
         // where the user expects the cursor to land where they were
@@ -162,21 +174,30 @@ struct ConnectionWindow: View {
         case .disconnected, .dropped:
             otpForm
         case .connecting, .reconnecting:
-            HStack(spacing: 10) {
-                ProgressView().controlSize(.small)
-                Text("Working…").foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(connectionManager.state.label)
+                        .foregroundStyle(.secondary)
+                }
+                LogView(entries: connectionManager.log)
+                    .frame(minHeight: 100, maxHeight: .infinity)
             }
-            .padding(.vertical, 4)
         case .connected:
-            // Brief confirmation; the menu bar carries the live
-            // status (IP / routes / DNS / "Disconnect") so we don't
-            // duplicate that here.
-            HStack(spacing: 8) {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                    .font(.title2)
-                Text("You can close this window.")
-                    .foregroundStyle(.secondary)
+            // The menu bar carries the live status (IP / routes /
+            // DNS / "Disconnect"). Here we show the full attempt log
+            // above the close prompt so the user can confirm what
+            // got wired up before clicking Close.
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .font(.title2)
+                    Text("You can close this window.")
+                        .foregroundStyle(.secondary)
+                }
+                LogView(entries: connectionManager.log)
+                    .frame(minHeight: 100, maxHeight: .infinity)
             }
         case .authLocked:
             Text("Packxy stopped trying to reconnect after multiple OTP failures, to avoid a FortiGate lockout.")
@@ -235,6 +256,16 @@ struct ConnectionWindow: View {
                     }
                     .frame(maxHeight: 120)
                 }
+            }
+            // Surface the prior-attempt log below `lastError` when
+            // present — the timestamped chronology often explains the
+            // one-liner above (e.g. "OTP rejected" preceded by sudo
+            // password-prompt failures, or "timeout" preceded by
+            // peer-resets). Hidden when empty so an initial
+            // `.disconnected` keeps its tight layout.
+            if !connectionManager.log.isEmpty {
+                LogView(entries: connectionManager.log)
+                    .frame(minHeight: 100, maxHeight: .infinity)
             }
         }
     }
@@ -328,10 +359,76 @@ struct ConnectionWindow: View {
             await connectionManager.start(config: appState.config, otp: otp)
         }
         otp = ""
-        // Auto-dismiss on success; keep open on failure so the user
-        // can see the redemand state and try again.
-        if case .connected = connectionManager.state {
-            dismissWindow()
+        // No auto-dismiss on success: the user wants to read the
+        // activity log and click Close themselves. The `.connected`
+        // content + footer already render that affordance.
+    }
+}
+
+// MARK: - LogView
+
+/// Scrolling, timestamped, monospaced view of the connect/reconnect
+/// activity log. Auto-scrolls to the newest line as entries arrive,
+/// using `entries.last?.id` (an `Equatable` UUID) as the trigger so
+/// SwiftUI doesn't re-fire on every `[LogEntry]` array publication.
+/// Backed by a textBackground-coloured panel with a subtle stroke so
+/// it reads as "log surface" against the rest of the window chrome.
+private struct LogView: View {
+    let entries: [LogEntry]
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(entries) { entry in
+                        HStack(alignment: .top, spacing: 6) {
+                            Text(Self.timestampFormatter.string(from: entry.timestamp))
+                                .foregroundStyle(.secondary)
+                            Text(entry.message)
+                                .foregroundStyle(color(for: entry.kind))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .id(entry.id)
+                    }
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .background(Color(nsColor: .textBackgroundColor))
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+            .onChange(of: entries.last?.id) { _, newID in
+                guard let newID else { return }
+                withAnimation(.easeOut(duration: 0.12)) {
+                    proxy.scrollTo(newID, anchor: .bottom)
+                }
+            }
+            .onAppear {
+                if let last = entries.last?.id {
+                    proxy.scrollTo(last, anchor: .bottom)
+                }
+            }
         }
     }
+
+    private func color(for kind: LogEntry.Kind) -> Color {
+        switch kind {
+        case .info:   return .primary
+        case .driver: return .secondary
+        case .warn:   return .orange
+        case .error:  return .red
+        }
+    }
+
+    private static let timestampFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
 }

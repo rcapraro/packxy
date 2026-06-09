@@ -57,7 +57,7 @@ struct PackxyApp: App {
         // regardless of the connection state at open time — without
         // this, a `.dropped` with a long `lastError` opens fatter than
         // a fresh `.disconnected`.
-        .defaultSize(width: 360, height: 280)
+        .defaultSize(width: 540, height: 340)
         // Centre on the main display on first open. Without this,
         // SwiftUI tends to plonk single-instance Windows at the top
         // edge of whatever display the user last clicked from — fine
