@@ -89,10 +89,14 @@ Optional: **General → Launch Packxy at login** registers the app via
 `SMAppService`; macOS will prompt once in System Settings → Login Items
 to confirm.
 
+![Packxy Settings window](assets/settings.jpeg)
+
 ## Use
 
 - Click the menu-bar shield → **Connect…** → enter the 6-digit 2FA
   code from your authenticator → **Connect**.
+
+  ![Connect to VPN dialog](assets/connection.png)
 - The menu bar shows the live state (`🟢 Connected · 10.x.x.x` /
   `🔴 Disconnected · 5m ago` / etc.) plus the active routes & split
   DNS domains.
