@@ -25,6 +25,12 @@ final class AppState: ObservableObject {
     /// disk. Stays in sync with config every time save/reload runs.
     private var savedConfig: Config
 
+    /// True once the connection window has been auto-opened at launch,
+    /// so the one-shot `.task` on the menu-bar label doesn't re-fire if
+    /// the label view is ever re-instantiated. Not @Published: this is a
+    /// one-shot lifecycle effect, not observed UI state.
+    var didAutoOpenWindow = false
+
     /// True when the in-memory config has unsaved edits. Drives the
     /// "Unsaved changes" indicator and enables Save/Revert in the UI.
     /// Re-evaluates implicitly whenever `config` (which is @Published)

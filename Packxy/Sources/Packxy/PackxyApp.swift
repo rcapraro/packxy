@@ -73,6 +73,7 @@ struct PackxyApp: App {
 private struct MenuBarLabel: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var connectionManager: ConnectionManager
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         // SwiftUI's MenuBarExtra renders Images at a smaller font size
@@ -81,6 +82,23 @@ private struct MenuBarLabel: View {
         Image(systemName: iconName)
             .font(.system(size: 18, weight: .medium))
             .accessibilityLabel("Packxy")
+            // Auto-open the connection window once at launch. The menu-bar
+            // label is the only scene element rendered immediately on a
+            // pure-MenuBarExtra agent (the menu *content* isn't built until
+            // the user opens the menu), so its `.task` is the reliable spot
+            // to fire the launch action. Same activate-then-open pattern as
+            // `MenuBarContent.showConnectionWindow()` — without the explicit
+            // `NSApp.activate`, an LSUIElement agent creates the window but
+            // leaves it behind whatever app had focus.
+            .task {
+                guard !appState.didAutoOpenWindow else { return }
+                appState.didAutoOpenWindow = true
+                // Don't pull the window forward if a session is already
+                // live (e.g. relaunch while the tunnel is up).
+                if case .connected = connectionManager.state { return }
+                NSApp.activate(ignoringOtherApps: true)
+                openWindow(id: WindowID.connection)
+            }
     }
 
     private var iconName: String {
