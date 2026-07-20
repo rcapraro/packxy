@@ -86,7 +86,7 @@ struct ConnectionWindow: View {
         // up behind whatever app had focus when the user clicked the
         // menu-bar item, and the OTP field never gets keyboard input.
         .onAppear {
-            NSApp.activate()
+            NSApp.activate(ignoringOtherApps: true)
             otpFocused = true
         }
     }
