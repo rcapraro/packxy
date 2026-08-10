@@ -510,6 +510,20 @@ private struct SplitTunnelingPane: View {
                 Text("Internal DNS server and the domains it answers for. Written to /etc/resolver/<domain>.")
                     .font(.callout).foregroundStyle(.secondary)
             }
+
+            Section {
+                EditableList(
+                    items: $appState.config.vpnTestHosts,
+                    placeholder: "db.internal.example.com",
+                    validate: validateDomain,
+                    normalize: { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+                )
+            } header: {
+                Text("Reachability check")
+            } footer: {
+                Text("Hostnames resolved after each connect. Packxy warns in the activity log if one resolves to an address your routes don't cover.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
         .scrollIndicators(.never)

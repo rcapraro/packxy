@@ -4,6 +4,8 @@
 //   • writeResolver / removeResolver — /etc/resolver/<domain> files
 //   • captureDefaultRoute / restoreDefaultIfHijacked — preserve the
 //     host default route after openfortivpn brings ppp0 up
+//   • CIDR math + resolveIPv4     — the post-connect reachability
+//     check that catches "resolves fine, routes nowhere"
 //
 // All operations rely on the sudoers drop-in installed by
 // Installer.install(): /sbin/route, /usr/bin/tee /etc/resolver/*,
@@ -40,17 +42,191 @@ enum NetworkConfig {
     // MARK: - Routes
 
     /// Adds `<cidr> via <dev>`. Idempotent at the kernel level: a
-    /// duplicate add returns "File exists" which we swallow.
+    /// duplicate add returns "File exists", which is a success for the
+    /// caller's purposes but is reported distinctly.
+    ///
+    /// Returns **true only when this call created the route**. That
+    /// distinction is load-bearing: `route delete` on BSD matches on
+    /// destination+netmask and ignores the interface, so deleting a
+    /// prefix we merely found in the table would rip out somebody
+    /// else's route (the host LAN, a VM bridge) at teardown. Callers
+    /// must only ever delete what they got `true` for.
     @discardableResult
     static func addRoute(cidr: String, dev: String) throws -> Bool {
         let result = runSudo(["/sbin/route", "-q", "add", "-net", cidr, "-interface", dev])
         if result.code == 0 { return true }
-        // "File exists" means the route is already in the table —
-        // that's the goal, return success rather than alarm callers.
         if result.stderr.contains("File exists") || result.stdout.contains("File exists") {
-            return true
+            return false
         }
         throw NetworkConfigError.routeFailed(cidr: cidr, stderr: result.stderr.isEmpty ? result.stdout : result.stderr)
+    }
+
+    /// Deletes `<cidr> via <dev>`. Only call this for CIDRs `addRoute`
+    /// returned `true` for — see the warning there.
+    ///
+    /// The kernel already flushes every route pointing at ppp0 when the
+    /// interface goes down, so the usual outcome is "not in table",
+    /// which is reported as success. We delete anyway because `stop()`
+    /// reports `.disconnected` even when the pkill didn't land, and a
+    /// stale route to a dead interface black-holes traffic silently.
+    ///
+    /// Returns nil on success, or a human-readable reason on failure —
+    /// a `sudo -n` refusal from a stale sudoers drop-in lands here, and
+    /// swallowing it would hide exactly the black-hole this guards.
+    @discardableResult
+    static func removeRoute(cidr: String, dev: String) -> String? {
+        let result = runSudo(["/sbin/route", "-q", "delete", "-net", cidr, "-interface", dev])
+        if result.code == 0 { return nil }
+        let output = result.stderr.isEmpty ? result.stdout : result.stderr
+        // Already gone (the kernel flushed it with the interface) is
+        // the expected path, not a failure.
+        if output.contains("not in table") || output.contains("No such process") {
+            return nil
+        }
+        return output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "exit \(result.code)"
+            : output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // MARK: - CIDR math
+    //
+    // Used by the post-connect reachability check. Everything here is
+    // pure: no sudo, no subprocess, safe to call off the main actor.
+
+    /// Dotted-quad → host-order UInt32. nil on anything malformed.
+    static func parseIPv4(_ s: String) -> UInt32? {
+        let octets = s.split(separator: ".", omittingEmptySubsequences: false)
+        guard octets.count == 4 else { return nil }
+        var value: UInt32 = 0
+        for octet in octets {
+            guard let n = UInt32(octet), n <= 255 else { return nil }
+            value = (value << 8) | n
+        }
+        return value
+    }
+
+    /// Dotted netmask (`255.255.255.0`) → prefix length (`24`).
+    /// openfortivpn logs masks, not prefixes, so `parseGatewayFacts`
+    /// needs this to build CIDRs. Rejects non-contiguous masks.
+    static func maskToPrefix(_ mask: String) -> Int? {
+        guard let bits = parseIPv4(mask) else { return nil }
+        // trailingZeroBitCount is the host-bit count (and is 32 for a
+        // 0.0.0.0 mask, which is exactly the /0 answer we want).
+        let prefix = 32 - bits.trailingZeroBitCount
+        // Contiguity check: rebuilding the mask from the prefix must
+        // reproduce the input, else it was something like 255.0.255.0.
+        let rebuilt: UInt32 = prefix == 0 ? 0 : ~UInt32(0) << (32 - prefix)
+        guard rebuilt == bits else { return nil }
+        return prefix
+    }
+
+    /// Whether `ip` falls inside `cidr` ("a.b.c.d/N").
+    static func cidrContains(_ cidr: String, ip: String) -> Bool {
+        let parts = cidr.split(separator: "/")
+        guard parts.count == 2,
+              let prefix = Int(parts[1]), (0...32).contains(prefix),
+              let base = parseIPv4(String(parts[0])),
+              let addr = parseIPv4(ip)
+        else { return false }
+        if prefix == 0 { return true }
+        let mask: UInt32 = ~UInt32(0) << (32 - prefix)
+        return (base & mask) == (addr & mask)
+    }
+
+    /// The first entry of `cidrs` that covers `ip`, or nil. Naming the
+    /// matching CIDR lets the activity log say *why* a host is
+    /// reachable, not just that it is.
+    static func coveringCIDR(_ ip: String, cidrs: [String]) -> String? {
+        cidrs.first { cidrContains($0, ip: ip) }
+    }
+
+    /// Whether any of `cidrs` covers `ip`.
+    static func routesCover(_ ip: String, cidrs: [String]) -> Bool {
+        coveringCIDR(ip, cidrs: cidrs) != nil
+    }
+
+    /// Whether `ip` is in RFC1918 space (10/8, 172.16/12, 192.168/16).
+    /// Corporate networks live here; a test host that resolves outside
+    /// it is a DNS problem, not a routing one.
+    static func isPrivateIPv4(_ ip: String) -> Bool {
+        cidrContains("10.0.0.0/8", ip: ip)
+            || cidrContains("172.16.0.0/12", ip: ip)
+            || cidrContains("192.168.0.0/16", ip: ip)
+    }
+
+    /// The /24 containing `ip` — the CIDR we suggest when a host
+    /// resolves outside every configured route.
+    ///
+    /// Returns nil for anything that isn't RFC1918. A public address
+    /// here means the lookup was answered by the public resolver (a
+    /// missing /etc/resolver file, a CNAME out of the internal zone,
+    /// split-horizon DNS), and telling the user to route a public /24
+    /// into the tunnel would turn a DNS misconfiguration into a
+    /// permanent traffic-hijacking one.
+    static func suggestedCIDR(for ip: String) -> String? {
+        let octets = ip.split(separator: ".")
+        guard octets.count == 4, isPrivateIPv4(ip) else { return nil }
+        return "\(octets[0]).\(octets[1]).\(octets[2]).0/24"
+    }
+
+    /// Smallest prefix length we're willing to install from a
+    /// gateway-pushed split route.
+    ///
+    /// A FortiGate can express "everything" as 0.0.0.0/0.0.0.0, and
+    /// some push the 0.0.0.0/1 + 128.0.0.0/1 half-internet pair. Either
+    /// one installed against ppp0 is a full tunnel — precisely what
+    /// Packxy's four locks exist to prevent — so anything broader than
+    /// a /8 is refused and reported instead of silently applied.
+    static let minimumGatewayPrefix = 8
+
+    /// Whether a gateway-pushed CIDR is narrow enough to install.
+    static func isAcceptableGatewayRoute(_ cidr: String) -> Bool {
+        let parts = cidr.split(separator: "/")
+        guard parts.count == 2, let prefix = Int(parts[1]) else { return false }
+        return prefix >= minimumGatewayPrefix
+    }
+
+    // MARK: - Name resolution
+
+    /// Resolves `host` to its IPv4 addresses through the system
+    /// resolver — which means it honours the /etc/resolver/<domain>
+    /// files Packxy just wrote, unlike a hand-rolled DNS query.
+    ///
+    /// BLOCKING: getaddrinfo(3) can sit on the network for seconds.
+    /// Never call this from the main actor.
+    static func resolveIPv4(_ host: String) -> [String] {
+        var hints = addrinfo(
+            ai_flags: 0,
+            ai_family: AF_INET,
+            ai_socktype: SOCK_STREAM,
+            ai_protocol: 0,
+            ai_addrlen: 0,
+            ai_canonname: nil,
+            ai_addr: nil,
+            ai_next: nil
+        )
+        var head: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, nil, &hints, &head) == 0, let list = head else {
+            return []
+        }
+        defer { freeaddrinfo(list) }
+
+        var found: [String] = []
+        var node: UnsafeMutablePointer<addrinfo>? = list
+        while let current = node {
+            if current.pointee.ai_family == AF_INET, let sa = current.pointee.ai_addr {
+                var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                var addr = sa.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+                    $0.pointee.sin_addr
+                }
+                if inet_ntop(AF_INET, &addr, &buf, socklen_t(INET_ADDRSTRLEN)) != nil {
+                    let ip = String(cString: buf)
+                    if !found.contains(ip) { found.append(ip) }
+                }
+            }
+            node = current.pointee.ai_next
+        }
+        return found
     }
 
     // MARK: - Split DNS

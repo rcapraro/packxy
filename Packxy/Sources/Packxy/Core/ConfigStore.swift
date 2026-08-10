@@ -23,6 +23,10 @@ struct Config: Equatable {
     var vpnRoutes: [String] = []
     var vpnDNS: String = ""
     var vpnDomains: [String] = []
+    /// Hostnames resolved after every connect so Packxy can warn when
+    /// one lands outside `vpnRoutes` — the "name resolves but nothing
+    /// routes there" failure mode.
+    var vpnTestHosts: [String] = []
 
     var hasSplitTunneling: Bool { !vpnRoutes.isEmpty }
     var hasSplitDNS: Bool { !vpnDNS.isEmpty && !vpnDomains.isEmpty }
@@ -100,6 +104,7 @@ enum ConfigStore {
             case "VPN_ROUTES":        c.vpnRoutes = splitCSV(value)
             case "VPN_DNS":           c.vpnDNS = value
             case "VPN_DOMAINS":       c.vpnDomains = splitCSV(value)
+            case "VPN_TEST_HOSTS":    c.vpnTestHosts = splitCSV(value)
             // FORTI_OTP is intentionally not persisted: it's a single-use
             // 30 s token that has no business living in a file.
             default: break
@@ -154,6 +159,9 @@ enum ConfigStore {
         b += "# Internal DNS server IP, plus the comma-separated domains it serves.\n"
         b += kv("VPN_DNS", c.vpnDNS)
         b += kv("VPN_DOMAINS", c.vpnDomains.joined(separator: ","))
+        b += "# Hostnames re-resolved after each connect; Packxy warns if one\n"
+        b += "# resolves to an address no VPN_ROUTES entry covers.\n"
+        b += kv("VPN_TEST_HOSTS", c.vpnTestHosts.joined(separator: ","))
 
         return b
     }
