@@ -13,17 +13,23 @@ import SwiftUI
 @MainActor
 final class AppState: ObservableObject {
     @Published var isInstalled: Bool
-    @Published var config: Config
+    @Published var config: Config { didSet { refreshDirty() } }
 
     /// Owns the live VPN connection. The UI binds against
     /// connectionManager.state for status display + show/hide of
     /// connect/disconnect actions.
     let connectionManager: ConnectionManager
 
-    /// Snapshot of the last successfully-loaded-or-saved config. Used
-    /// to compute `isDirty` and to support Revert without re-hitting
-    /// disk. Stays in sync with config every time save/reload runs.
-    private var savedConfig: Config
+    /// Snapshot of the last successfully-loaded-or-saved config. Backs
+    /// `isDirty` and supports Revert without re-hitting disk. Stays in
+    /// sync with config every time save/reload runs.
+    ///
+    /// The `didSet` matters: `saveConfig()` moves *only* this side of
+    /// the comparison, and a plain stored property publishes nothing.
+    /// Without it the Settings action bar kept rendering the pre-save
+    /// state — "Unsaved" dot up, Save/Revert enabled — until some
+    /// unrelated change (switching panes) forced a re-render.
+    private var savedConfig: Config { didSet { refreshDirty() } }
 
     /// True once the connection window has been auto-opened at launch,
     /// so the one-shot `.task` on the menu-bar label doesn't re-fire if
@@ -52,9 +58,17 @@ final class AppState: ObservableObject {
 
     /// True when the in-memory config has unsaved edits. Drives the
     /// "Unsaved changes" indicator and enables Save/Revert in the UI.
-    /// Re-evaluates implicitly whenever `config` (which is @Published)
-    /// changes, since any view reading `isDirty` already depends on it.
-    var isDirty: Bool { config != savedConfig }
+    /// Published rather than computed so every transition — in *both*
+    /// directions — emits `objectWillChange` on its own.
+    @Published private(set) var isDirty: Bool = false
+
+    /// Recomputed from both sides of the comparison. Only assigns on an
+    /// actual flip, so per-keystroke config edits don't publish a
+    /// redundant `isDirty` change on top of the `config` one.
+    private func refreshDirty() {
+        let dirty = config != savedConfig
+        if isDirty != dirty { isDirty = dirty }
+    }
 
     init() {
         let loaded = ConfigStore.load()
