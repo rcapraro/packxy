@@ -29,8 +29,15 @@ struct ConnectionWindow: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var connectionManager: ConnectionManager
     @Environment(\.dismissWindow) private var dismissWindow
+    /// `.key` when *this* view's NSWindow is the key window. Used to
+    /// re-assert OTP focus after AppKit's become-key first-responder
+    /// pass — see the `.onChange` at the bottom of `body`.
+    @Environment(\.controlActiveState) private var controlActiveState
 
     @State private var otp: String = ""
+    /// Guards the become-key focus re-assert to once per appearance —
+    /// see the `.onChange(of: controlActiveState)` at the end of `body`.
+    @State private var hasTakenInitialFocus = false
     @FocusState private var otpFocused: Bool
 
     var body: some View {
@@ -81,13 +88,37 @@ struct ConnectionWindow: View {
             default: break
             }
         }
-        // Menu-bar agents (LSUIElement=YES) don't activate when one of
-        // their windows opens — without this, the Connect window shows
-        // up behind whatever app had focus when the user clicked the
-        // menu-bar item, and the OTP field never gets keyboard input.
+        // Opts this window into the .regular/.accessory policy flip and
+        // guarantees it comes forward and becomes key when it opens —
+        // see WindowActivation. Menu-bar agents (LSUIElement=YES) don't
+        // get that for free: the window otherwise shows up behind
+        // whatever app had focus and never accepts keyboard input.
+        .packxyWindow(.connection)
         .onAppear {
-            NSApp.activate(ignoringOtherApps: true)
+            hasTakenInitialFocus = false
             otpFocused = true
+        }
+        // `.onAppear` runs *before* the window becomes key, and AppKit
+        // installs the window's `initialFirstResponder` at become-key
+        // time — clobbering the @FocusState set above. Re-assert once
+        // the window is actually key. `controlActiveState` is
+        // window-scoped, unlike NSWindow.didBecomeKeyNotification which
+        // would also fire when the *Settings* window takes key and would
+        // yank the cursor back here.
+        //
+        // Strictly one-shot per appearance. Re-asserting on *every*
+        // transition to `.key` would hijack the caret each time the
+        // user came back to the window: in `.dropped` they can click
+        // into the (selectable) error text or log to copy a line, and
+        // ⌘-Tabbing away and back would rip the selection out from
+        // under them and drop the cursor in the OTP field.
+        .onChange(of: controlActiveState) { _, state in
+            guard state == .key, !hasTakenInitialFocus else { return }
+            hasTakenInitialFocus = true
+            switch connectionManager.state {
+            case .disconnected, .dropped: otpFocused = true
+            default: break
+            }
         }
     }
 

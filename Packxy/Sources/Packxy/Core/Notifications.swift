@@ -127,8 +127,11 @@ extension Notifications: UNUserNotificationCenterDelegate {
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
-        DispatchQueue.main.async {
-            NSApp.activate()
+        // Deliberately NOT WindowActivation.present(_:): no window of
+        // ours opens here, so flipping to .regular would strand the app
+        // with a Dock tile and nothing to close to get rid of it.
+        Task { @MainActor in
+            WindowActivation.activateWithoutWindow()
         }
         completionHandler()
     }

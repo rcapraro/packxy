@@ -31,6 +31,25 @@ final class AppState: ObservableObject {
     /// one-shot lifecycle effect, not observed UI state.
     var didAutoOpenWindow = false
 
+    /// The live AppState, so non-SwiftUI entry points can reach it —
+    /// specifically AppDelegate.applicationShouldTerminate, which fires
+    /// for ⌘Q / Dock Quit / logout and has no access to the SwiftUI
+    /// environment.
+    ///
+    /// Deliberately strong, and deliberately NOT assigned from `init`.
+    /// SwiftUI may evaluate a @StateObject's initializer more than once
+    /// and discard all but one instance, so an init-time assignment can
+    /// bind a throwaway — which, held weakly, then goes nil and makes
+    /// the quit guard silently skip teardown. `bindAsCurrent()` is
+    /// instead called from the scene that received the instance SwiftUI
+    /// actually kept.
+    static private(set) var current: AppState?
+
+    /// Marks this instance as the one non-SwiftUI code should reach for.
+    func bindAsCurrent() {
+        Self.current = self
+    }
+
     /// True when the in-memory config has unsaved edits. Drives the
     /// "Unsaved changes" indicator and enables Save/Revert in the UI.
     /// Re-evaluates implicitly whenever `config` (which is @Published)

@@ -14,6 +14,10 @@ enum WindowID {
 
 @main
 struct PackxyApp: App {
+    // Needed for launch provenance (login-item vs user launch) and the
+    // disconnect-before-quit guard — neither has a SwiftUI scene-level
+    // equivalent. See AppDelegate.
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var appState = AppState()
 
     var body: some Scene {
@@ -86,18 +90,28 @@ private struct MenuBarLabel: View {
             // label is the only scene element rendered immediately on a
             // pure-MenuBarExtra agent (the menu *content* isn't built until
             // the user opens the menu), so its `.task` is the reliable spot
-            // to fire the launch action. Same activate-then-open pattern as
-            // `MenuBarContent.showConnectionWindow()` — without the explicit
-            // `NSApp.activate`, an LSUIElement agent creates the window but
-            // leaves it behind whatever app had focus.
+            // to fire the launch action.
             .task {
+                // Bind the AppDelegate's back-reference to the instance
+                // SwiftUI actually kept, before any early return below.
+                appState.bindAsCurrent()
                 guard !appState.didAutoOpenWindow else { return }
                 appState.didAutoOpenWindow = true
+                // Login-item launch: menu-bar icon only. Throwing a
+                // window on screen while the user is still logging in is
+                // hostile, and macOS suppresses focus-stealing by
+                // background-launched apps anyway, so it would land
+                // buried. `launchedByUser` is set in
+                // applicationDidFinishLaunching, which runs before
+                // SwiftUI's first view update — so this read is ordered,
+                // not a race.
+                guard AppDelegate.launchedByUser else { return }
                 // Don't pull the window forward if a session is already
                 // live (e.g. relaunch while the tunnel is up).
                 if case .connected = connectionManager.state { return }
-                NSApp.activate(ignoringOtherApps: true)
-                openWindow(id: WindowID.connection)
+                WindowActivation.present(.connection) {
+                    openWindow(id: WindowID.connection)
+                }
             }
     }
 

@@ -38,32 +38,13 @@ struct MenuBarContent: View {
 
             Divider()
 
-            Button("Quit Packxy") { confirmQuit() }
+            // The disconnect-before-quit confirmation lives in
+            // AppDelegate.applicationShouldTerminate, not here: once the
+            // app flips to .regular the main menu's Quit item makes ⌘Q a
+            // live quit path, and a check on this button alone would be
+            // bypassed by it (and by the Dock menu, and by logout).
+            Button("Quit Packxy") { NSApplication.shared.terminate(nil) }
                 .keyboardShortcut("q")
-        }
-    }
-
-    /// Confirm before quitting while a tunnel is up — a stray ⌘Q
-    /// would otherwise drop the FortiGate session silently and the
-    /// user would only notice when the next packet failed to route.
-    /// In any other state we exit immediately (no surprise to lose).
-    private func confirmQuit() {
-        guard case .connected = connectionManager.state else {
-            NSApplication.shared.terminate(nil)
-            return
-        }
-        NSApp.activate()
-        let alert = NSAlert()
-        alert.messageText = "Disconnect VPN and quit Packxy?"
-        alert.informativeText = "The tunnel will be torn down before the app exits."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Quit")
-        alert.addButton(withTitle: "Cancel")
-        if alert.runModal() == .alertFirstButtonReturn {
-            Task {
-                await connectionManager.stop()
-                NSApplication.shared.terminate(nil)
-            }
         }
     }
 
@@ -198,19 +179,16 @@ struct MenuBarContent: View {
         }
     }
 
-    /// Brings Packxy to the foreground BEFORE opening the connection
-    /// window. Without the explicit activate, SwiftUI's
-    /// `openWindow(id:)` reliably *creates* the window but doesn't
-    /// always pull the agent app forward — the user clicks
-    /// "Reconnect…" and the window appears behind their browser, the
-    /// menu closes, and from their POV "nothing happens".
-    ///
-    /// `activate(ignoringOtherApps: true)` is deprecated in macOS 14
-    /// but its replacement `activate()` does NOT pull an LSUIElement
-    /// agent app forward — the deprecation is API-only; the behavior
-    /// is still what we need.
+    /// Brings Packxy forward and opens the connection window. The heavy
+    /// lifting — activation policy, the activation request, and making
+    /// the real NSWindow key once it exists — lives in
+    /// `WindowActivation`, the single choke point for every
+    /// window-showing path. Without it the user clicks "Reconnect…",
+    /// the window appears behind their browser, the menu closes, and
+    /// from their POV "nothing happens".
     private func showConnectionWindow() {
-        NSApp.activate(ignoringOtherApps: true)
-        openWindow(id: WindowID.connection)
+        WindowActivation.present(.connection) {
+            openWindow(id: WindowID.connection)
+        }
     }
 }

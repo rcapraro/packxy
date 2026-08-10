@@ -97,6 +97,29 @@ final class ConnectionManager: ObservableObject {
 
     // MARK: - Public actions
 
+    /// True when this process still holds host configuration that
+    /// outlives it — an openfortivpn child, routes we installed, or
+    /// /etc/resolver files — and therefore MUST run `stop()` before
+    /// the app exits.
+    ///
+    /// Deliberately not a check on `state == .connected`: a `.dropped`
+    /// session still has its resolver files on disk pointing at a
+    /// now-unreachable internal DNS server (see ConnectionWindow's
+    /// Cancel button), and a `.connecting` / `.reconnecting` attempt
+    /// may have a spawn in flight that `OpenfortivpnDriver.stop()`
+    /// tracks statically even before we've adopted the Process here.
+    /// Quitting in any of those states without a teardown strands DNS
+    /// and routes with no app left to clean them up.
+    var needsTeardown: Bool {
+        if openfortivpn != nil || !installedRoutes.isEmpty || !domains.isEmpty {
+            return true
+        }
+        switch state {
+        case .connecting, .reconnecting: return true
+        default: return false
+        }
+    }
+
     /// Initial connect. Reads everything from `config`, prompts the
     /// caller for `otp` separately because OTPs are 30s tokens not
     /// safe to persist.

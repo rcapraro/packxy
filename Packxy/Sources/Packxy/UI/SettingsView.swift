@@ -97,12 +97,11 @@ struct SettingsView: View {
             }
         }
         .frame(minWidth: 760, minHeight: 680)
-        // Menu-bar agents (LSUIElement=YES) don't activate when one of
-        // their windows opens — Settings shows up behind whatever app
-        // had focus when the user clicked the menu-bar item. Force
-        // activation so the window comes to the front and accepts
-        // keyboard input on first appearance.
-        .onAppear { NSApp.activate() }
+        // Opts Settings into the .regular/.accessory policy flip and
+        // brings its NSWindow forward + key on open — see
+        // WindowActivation. `SettingsLink` is opaque, so this is the
+        // only hook we get on this scene.
+        .packxyWindow(.settings)
     }
 
     // MARK: - Sidebar
