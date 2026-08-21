@@ -53,6 +53,14 @@ final class ConnectionManager: ObservableObject {
     @Published private(set) var log: [LogEntry] = []
     private static let logCapacity = 500
 
+    /// Live tunnel performance — throughput over ppp0 and RTT to the
+    /// gateway — sampled once a second while connected.
+    ///
+    /// Deliberately *not* `@Published` here: it's a separate observable
+    /// object so a once-a-second sample doesn't invalidate every view
+    /// watching the connection. See `LinkMetricsStore`.
+    let metrics = LinkMetricsStore()
+
     // MARK: - Internal state
 
     private var openfortivpn: Process?
@@ -79,6 +87,11 @@ final class ConnectionManager: ObservableObject {
     /// The in-flight reachability check, cancelled whenever the
     /// connection it belongs to goes away.
     private var reachabilityTask: Task<Void, Never>?
+    /// The in-flight performance poller, likewise scoped to one
+    /// connection. Epoch-guarded for the same reason: a sample taken
+    /// from a dying interface must not land in a newer connection's
+    /// readout.
+    private var metricsTask: Task<Void, Never>?
 
     // MARK: - Lifecycle
 
@@ -93,6 +106,7 @@ final class ConnectionManager: ObservableObject {
     deinit {
         powerTask?.cancel()
         reachabilityTask?.cancel()
+        metricsTask?.cancel()
     }
 
     // MARK: - Public actions
@@ -180,6 +194,7 @@ final class ConnectionManager: ObservableObject {
 
             appendLog("Connected — \(routes.count) route(s), \(domains.count) resolver(s).")
             transition(to: .connected(ip: up.ip, since: Date()))
+            startMetrics(facts: up.facts)
             runReachabilityCheck(config: config)
         } catch let e as OpenfortivpnDriverError {
             // Spawn failed before ppp0 came up. Stash a humane message
@@ -255,6 +270,7 @@ final class ConnectionManager: ObservableObject {
 
             appendLog("Reconnected — \(routes.count) route(s), \(domains.count) resolver(s).")
             transition(to: .connected(ip: up.ip, since: Date()))
+            startMetrics(facts: up.facts)
             runReachabilityCheck(config: config)
         } catch let e as OpenfortivpnDriverError {
             NSLog("packxy: reconnect failed: %@", e.errorDescription ?? "(no description)")
@@ -314,6 +330,15 @@ final class ConnectionManager: ObservableObject {
     private func transition(to newState: ConnectionState) {
         let previous = state
         state = newState
+
+        // Unconditional, so this stays the single funnel it claims to
+        // be: the connect paths call startMetrics right after
+        // transitioning into `.connected`, and a fresh poller costs
+        // nothing to spawn. Special-casing `.connected` here would make
+        // the funnel silently depend on callers remembering to restart
+        // it, and a future path that forgot would leave the readout dead
+        // with nothing to point at.
+        stopMetrics()
 
         switch newState {
         case .dropped(let reason, _):
@@ -434,6 +459,45 @@ final class ConnectionManager: ObservableObject {
         }
         installedRoutes.removeAll()
         routes.removeAll()
+    }
+
+    /// Starts the once-a-second performance poll for the connection
+    /// that just came up.
+    ///
+    /// Must be called *after* the `.connected` transition — see the
+    /// note in `transition(to:)`.
+    ///
+    /// The monitor probes the ppp peer first and falls back to the
+    /// gateway's own nameservers, which answer even when the FortiGate
+    /// drops ICMP to the peer.
+    ///
+    /// The candidates are handed over unfiltered: the monitor rejects
+    /// any that don't actually route over ppp0, by asking the kernel
+    /// rather than by inferring it from the CIDRs we installed. A route
+    /// in `routes` may have been in the table before we arrived and
+    /// point at another interface entirely — which for an RFC1918
+    /// nameserver the user's own LAN happens to own would mean reporting
+    /// a ~1 ms LAN round-trip as though it were the tunnel's.
+    private func startMetrics(facts: GatewayFacts) {
+        metricsTask?.cancel()
+        let epoch = connectionEpoch
+        let fallbackHosts = facts.dnsServers
+
+        metricsTask = Task { @MainActor [weak self] in
+            for await sample in LinkMetricsMonitor.stream(fallbackHosts: fallbackHosts) {
+                guard let self, self.connectionEpoch == epoch else { return }
+                self.metrics.append(sample)
+            }
+        }
+    }
+
+    /// Stops the poller and clears the readout. Dropping the stream's
+    /// iterator fires its `onTermination`, which cancels the detached
+    /// sampling task underneath it.
+    private func stopMetrics() {
+        metricsTask?.cancel()
+        metricsTask = nil
+        metrics.clear()
     }
 
     /// Invalidates any in-flight reachability check so its results are

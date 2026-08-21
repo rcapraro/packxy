@@ -350,6 +350,78 @@ enum NetworkConfig {
         return nil
     }
 
+    /// The interface the kernel would actually send traffic for `ip`
+    /// out of, or nil if there's no route (or `route` fails).
+    ///
+    /// This is the only honest test of whether a probe would travel
+    /// through the tunnel. Inferring it from the CIDRs we installed is
+    /// not the same question: a prefix that was already in the table
+    /// when we got there may well point at another interface, and a
+    /// point-to-point peer is not reachable over its own interface just
+    /// by virtue of being the peer — openfortivpn deliberately deletes
+    /// the /32 to the VPN server via ppp0 so the tunnel's own TLS
+    /// traffic doesn't tunnel itself, which leaves the peer reachable
+    /// only over the physical link.
+    ///
+    /// Blocking (spawns route); must not run on the main actor.
+    static func routeInterface(for ip: String) -> String? {
+        guard !ip.isEmpty else { return nil }
+        let result = runSync(["/sbin/route", "-n", "get", ip])
+        guard result.code == 0 else { return nil }
+        for line in result.stdout.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("interface:") else { continue }
+            let iface = String(trimmed.dropFirst("interface:".count))
+                .trimmingCharacters(in: .whitespaces)
+            return iface.isEmpty ? nil : iface
+        }
+        return nil
+    }
+
+    /// Returns the point-to-point peer address of `iface`. For ppp0
+    /// that's the gateway — but note it is typically the gateway's
+    /// *public* address, and typically not routed over the tunnel; see
+    /// `routeInterface(for:)` before using it as an in-tunnel probe
+    /// target.
+    ///
+    /// nil for an interface that isn't point-to-point (no `-->` in the
+    /// inet line) as well as for one that's absent.
+    ///
+    /// Blocking (spawns ifconfig); must not run on the main actor.
+    static func peerIPv4(_ iface: String) -> String? {
+        let result = runSync(["/sbin/ifconfig", iface])
+        guard result.code == 0 else { return nil }
+        for line in result.stdout.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("inet ") else { continue }
+            let fields = trimmed.split(separator: " ")
+            // "inet 10.212.134.220 --> 10.212.134.1 netmask …" → fields[3]
+            guard fields.count >= 4, fields[2] == "-->" else { continue }
+            return String(fields[3])
+        }
+        return nil
+    }
+
+    /// Round-trip time to `host` in milliseconds, or nil if it didn't
+    /// answer inside `timeoutSeconds`.
+    ///
+    /// Shells out to ping rather than opening an ICMP socket directly:
+    /// macOS lets an unprivileged process open SOCK_DGRAM/IPPROTO_ICMP,
+    /// so neither route needs a sudoers entry, and scraping one line of
+    /// ping's output is far less code than assembling and checksumming
+    /// an echo request by hand.
+    ///
+    /// Blocking for up to `timeoutSeconds`; must not run on the main
+    /// actor.
+    static func pingLatencyMilliseconds(host: String, timeoutSeconds: Int = 2) -> Double? {
+        guard !host.isEmpty else { return nil }
+        let result = runSync(["/sbin/ping", "-c", "1", "-n", "-t", "\(timeoutSeconds)", host])
+        guard result.code == 0 else { return nil }
+        // "64 bytes from 10.212.134.1: icmp_seq=0 ttl=255 time=12.345 ms"
+        guard let marker = result.stdout.range(of: "time=") else { return nil }
+        return Double(result.stdout[marker.upperBound...].prefix { !$0.isWhitespace })
+    }
+
     // MARK: - Process helpers
 
     fileprivate struct RunResult {

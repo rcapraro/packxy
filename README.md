@@ -149,13 +149,17 @@ Installation act immediately and carry no bar.
   6-digit 2FA code from your authenticator → **Connect**. The window
   then shows the live activity log, and stays open until you close it.
 - The menu bar shows the live state (`🟢 Connected · 10.x.x.x` /
-  `🔴 Disconnected · 5m ago` / etc.) plus the active routes & split
-  DNS domains. When the components aren't installed, or host / username
-  / password aren't all set, it says so there and greys out
-  **Connect…** rather than letting you walk into a certain failure.
+  `🔴 Disconnected · 5m ago` / etc.), a live throughput line while
+  connected (`↓ 1,2 MB/s   ↑ 340 KB/s  ·  24 ms`), plus the active
+  routes & split DNS domains. When the components aren't installed, or
+  host / username / password aren't all set, it says so there and greys
+  out **Connect…** rather than letting you walk into a certain failure.
 - On drop (auth expired, network blip, wake from sleep), Packxy posts
   a notification and reopens the OTP prompt with a reason-tailored
   title.
+- **Open status…** (⌘O) reopens the connect window while connected, so
+  the activity log and the throughput graphs stay reachable after you've
+  closed it — the menu itself only has room for the one-line summary.
 - **Disconnect** (⌘D) from the menu bar tears down `ppp0`, removes the
   configured resolvers, and returns to a clean state.
 - While a Packxy window is open the app takes a Dock tile and a ⌘-Tab
@@ -177,9 +181,10 @@ where you're about to type:
   submit.`), with **Close** and **Connect**.
 - **Connecting / reconnecting** — a spinner and the live activity log
   below it.
-- **Connected** — a green check, "You can close this window", and the
-  log of the attempt. Nothing dismisses it but you; the live status
-  lives in the menu bar from here on.
+- **Connected** — a green check, "You can close this window", three
+  **Down / Up / Ping** tiles each with a sparkline of the last minute,
+  and the log of the attempt. Nothing dismisses it but you; the live
+  status lives in the menu bar from here on.
 - **After a drop** — the same form, retitled with the reason (auth
   expired, network drop, wake from sleep) so it matches the
   notification you just got. **Cancel** tears the tunnel down rather
@@ -189,6 +194,83 @@ where you're about to type:
 - **After four rejected codes** — a dead end explaining that Packxy
   stopped on purpose, to stay clear of the FortiGate's five-attempt
   account lockout.
+
+### Speed and latency
+
+While connected, both the connect window and the menu bar carry a live
+readout that refreshes once a second: **Down**, **Up**, and **Ping**.
+The window shows them as three tiles — the figure large with its unit
+kept quiet beside it — each over a sparkline of the last 60 samples; the
+menu bar carries the same three numbers on one line.
+
+- **Down / Up** are *passive* throughput — the rate of change of
+  `ppp0`'s own byte counters, read straight from the kernel. That means
+  they show what is actually crossing the tunnel right now, and an idle
+  tunnel honestly reads `0 bytes/s`. This is deliberately not a speed
+  test: an active one would burn the bandwidth it claims to measure,
+  and would have to load an internal host once a minute to do it. The
+  labels say "Down"/"Up" rather than "Speed" for the same reason —
+  that zero is quiet traffic, not a broken link.
+- **Ping** is one ICMP echo every five seconds, and the number is only
+  worth showing if the echo actually travelled through the tunnel — so
+  every candidate target is vetted by asking the kernel
+  (`route -n get <ip>`) whether it routes over `ppp0`, and dropped if it
+  doesn't. Candidates are `ppp0`'s point-to-point peer followed by the
+  nameservers the gateway pushed.
+
+  In practice on a FortiGate the peer is rejected: it's the gateway's
+  *public* address, and openfortivpn deliberately deletes the route to
+  it via `ppp0` (that's the `Removing wrong route to vpn server` line in
+  the log) so the tunnel's own TLS traffic doesn't tunnel itself. Pinging
+  it would measure your ISP path to the concentrator — which is close
+  enough to the real figure to look convincing and still be the wrong
+  number. So the target is normally an internal nameserver.
+
+  Checking the routing table rather than the CIDRs Packxy installed
+  matters for the same reason: a prefix that was already in the table
+  when Packxy arrived may point at another interface entirely, and for
+  an RFC1918 nameserver your own LAN happens to own, that would report a
+  ~1 ms LAN round-trip as though it were the tunnel's.
+
+  If nothing answers, Ping reads `—` rather than a misleading zero. And
+  if the chosen target later goes quiet, Packxy re-runs the candidates
+  instead of reporting `—` for the rest of the session.
+
+  **Down** and **Up** keep working regardless: latency is measured on its
+  own clock, in its own task, so an unanswered echo — up to two seconds
+  each, and a full sweep of silent candidates rather more — can never
+  hold up the once-a-second throughput sample.
+- Rates are quoted in SI units (MB of 1000), matching how every other
+  tool the number gets compared against quotes them.
+- The **Ping** figure is tinted by round-trip time, using the same
+  green / yellow / red the menu-bar status dot uses: green under 60 ms,
+  yellow under 150 ms, red beyond. Those thresholds are judgement calls
+  tuned for an internal gateway — a couple of dozen milliseconds is a
+  healthy link, and past a sixth of a second the lag is felt in an
+  interactive session. VoiceOver reads the grade out loud, since the
+  colour is otherwise the only thing carrying it.
+- The **sparklines** trade precision for shape: they say whether a rate
+  is climbing, bursting or flat, which no single number can. Down and Up
+  deliberately share one vertical scale — the tiles sit side by side and
+  will be read against each other, so scaling each to its own maximum
+  would draw an idle upstream as busy as a saturated downstream. Each
+  scale also has a floor (64 KB/s for rates, 50 ms for latency) so a
+  quiet tunnel draws a flat line instead of magnifying byte-level noise
+  into a mountain range. The horizontal axis is samples rather than
+  seconds, so a tick stretched by a slow echo is still one even step —
+  and a stretch with no latency reading leaves a visible gap in the Ping
+  trace instead of being bridged, so it stays in step with the two
+  traces beside it.
+- No extra privileges are involved: the counters come from
+  `getifaddrs(3)` inside the app, and macOS lets an unprivileged
+  process send an ICMP echo. Nothing here touches the sudoers drop-in,
+  so an existing install needs no refresh.
+
+The readout stops and clears the moment the tunnel does — on
+disconnect, on a drop, on sleep — so a stale rate can never be left on
+screen for a tunnel that's gone. The sparkline history is discarded with
+it, so a reconnect starts from an empty graph rather than splicing the
+dead tunnel's samples onto the new one's.
 
 ### Activity log
 
@@ -327,9 +409,11 @@ Packxy/
     Core/                     ConfigStore, ConnectionManager,
                               OpenfortivpnDriver, NetworkConfig,
                               WindowActivation, AppDelegate,
-                              PowerObserver, Notifications, …
+                              PowerObserver, LinkMetrics,
+                              Notifications, …
     UI/                       SettingsView, ConnectionWindow,
-                              MenuBarContent, EditableList
+                              MenuBarContent, EditableList,
+                              IndicatorColor
 assets/icon.png               source for AppIcon.icns
 Makefile
 README.md

@@ -25,6 +25,7 @@ struct PackxyApp: App {
             MenuBarContent()
                 .environmentObject(appState)
                 .environmentObject(appState.connectionManager)
+                .environmentObject(appState.connectionManager.metrics)
         } label: {
             // Wrapped in a dedicated view so the label re-renders on
             // both `appState.isInstalled` AND `connectionManager.state`
@@ -33,6 +34,7 @@ struct PackxyApp: App {
             MenuBarLabel()
                 .environmentObject(appState)
                 .environmentObject(appState.connectionManager)
+                .environmentObject(appState.connectionManager.metrics)
         }
         .menuBarExtraStyle(.menu)
 
@@ -40,6 +42,7 @@ struct PackxyApp: App {
             SettingsView()
                 .environmentObject(appState)
                 .environmentObject(appState.connectionManager)
+                .environmentObject(appState.connectionManager.metrics)
         }
 
         // Single-instance Window for the connect / reconnect flow.
@@ -50,6 +53,7 @@ struct PackxyApp: App {
             ConnectionWindow()
                 .environmentObject(appState)
                 .environmentObject(appState.connectionManager)
+                .environmentObject(appState.connectionManager.metrics)
         }
         // `.contentMinSize` (not `.contentSize`) so the view's frame
         // sets only the *minimum* — the user can grow the window if
@@ -61,7 +65,7 @@ struct PackxyApp: App {
         // regardless of the connection state at open time — without
         // this, a `.dropped` with a long `lastError` opens fatter than
         // a fresh `.disconnected`.
-        .defaultSize(width: 540, height: 340)
+        .defaultSize(width: 540, height: 440)
         // Centre on the main display on first open. Without this,
         // SwiftUI tends to plonk single-instance Windows at the top
         // edge of whatever display the user last clicked from — fine

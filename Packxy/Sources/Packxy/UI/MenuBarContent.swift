@@ -11,6 +11,7 @@ import SwiftUI
 struct MenuBarContent: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var connectionManager: ConnectionManager
+    @EnvironmentObject var metrics: LinkMetricsStore
     @Environment(\.openWindow) private var openWindow
 
     /// Cap on how many comma-separated items we surface in the menu
@@ -62,7 +63,7 @@ struct MenuBarContent: View {
         // single line, and the per-run `.foregroundStyle` survives
         // the menu's text rendering.
         (Text(Image(systemName: "circle.fill"))
-            .foregroundStyle(indicatorColor(s.indicator))
+            .foregroundStyle(s.indicator.color)
          + Text("  \(stateSummary(s))"))
             // VoiceOver doesn't read the inline Image's color, so
             // the explicit label is what conveys "we're red /
@@ -73,6 +74,41 @@ struct MenuBarContent: View {
 
         switch s {
         case .connected:
+            // Rendered unconditionally — with "—" placeholders until the
+            // first sample lands about a second after connecting. Making
+            // the row conditional would have it appear a beat later and
+            // shove Routes / DNS / Disconnect down a slot, under a
+            // cursor that's already moving toward one of them.
+            //
+            // Same concatenation constraint as the dot line above: an
+            // HStack here would be flattened into three separate rows.
+            let latest = metrics.latest
+            let down = LinkMetrics.rateText(latest?.downBytesPerSecond)
+            let up = LinkMetrics.rateText(latest?.upBytesPerSecond)
+            let ping = LinkMetrics.latencyText(latest?.latencyMilliseconds)
+            let pingTint = LinkMetrics.latencyIndicator(latest?.latencyMilliseconds)?.color
+            // Literal arrow characters rather than SF Symbols. As
+            // `Image(systemName:)` runs these rendered flat black —
+            // near-invisible in a dark menu — because the outer
+            // `.foregroundStyle` below does not reach an inline Image,
+            // and only the ping run carried one of its own. A per-run
+            // colour on each Image would likely have fixed it (that is
+            // what the dot line above does), but a text run takes its
+            // colour with no ambiguity at all, and in a menu that is
+            // worth more than the nicer glyph. The tints match the
+            // window's tiles so the two surfaces read as one readout.
+            (Text("↓").foregroundStyle(.teal)
+             + Text(" \(down)   ")
+             + Text("↑").foregroundStyle(.indigo)
+             + Text(" \(up)")
+             + Text("  ·  ")
+             + Text(ping).foregroundStyle(pingTint ?? .secondary))
+                .foregroundStyle(.secondary)
+                // Spelled out rather than left to VoiceOver, which
+                // would read the arrows as bare "down arrow" / "up
+                // arrow" glyphs stranded next to a number.
+                .accessibilityLabel("Down \(down), up \(up), ping \(ping)")
+
             if !cm.routes.isEmpty {
                 Text("Routes: \(summarize(cm.routes))")
                     .foregroundStyle(.secondary)
@@ -100,14 +136,6 @@ struct MenuBarContent: View {
             return "\(s.label) · \(relativeTime(at))"
         default:
             return s.label
-        }
-    }
-
-    private func indicatorColor(_ i: ConnectionState.Indicator) -> Color {
-        switch i {
-        case .ok:   return .green
-        case .warn: return .yellow
-        case .bad:  return .red
         }
     }
 
@@ -158,6 +186,13 @@ struct MenuBarContent: View {
         case .connecting, .reconnecting:
             Button("Show progress…") { showConnectionWindow() }
         case .connected:
+            // The window is the only place the activity log and the
+            // throughput graphs live, and closing it while connected
+            // used to strand them — the menu carries a one-line summary
+            // and nothing else. Above Disconnect, so the benign action
+            // is the one under the cursor first.
+            Button("Open status…") { showConnectionWindow() }
+                .keyboardShortcut("o")
             Button("Disconnect") {
                 Task { await connectionManager.stop() }
             }

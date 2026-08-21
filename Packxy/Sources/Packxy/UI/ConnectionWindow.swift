@@ -28,6 +28,7 @@ import SwiftUI
 struct ConnectionWindow: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var connectionManager: ConnectionManager
+    @EnvironmentObject var metrics: LinkMetricsStore
     @Environment(\.dismissWindow) private var dismissWindow
     /// `.key` when *this* view's NSWindow is the key window. Used to
     /// re-assert OTP focus after AppKit's become-key first-responder
@@ -77,7 +78,7 @@ struct ConnectionWindow: View {
         // error without the inner scroll. minHeight is generous
         // enough to give the connect/reconnect log view reasonable
         // default room without forcing an immediate resize.
-        .frame(minWidth: 440, minHeight: 280)
+        .frame(minWidth: 440, minHeight: 355)
         // Re-focus the OTP field whenever the state flips back to an
         // input form — covers the "OTP rejected, try again" path
         // where the user expects the cursor to land where they were
@@ -151,7 +152,8 @@ struct ConnectionWindow: View {
             sectionHeader(title: "Reconnecting…", detail: "Re-establishing the tunnel.")
         case .connected:
             sectionHeader(title: "Connected",
-                          detail: "VPN tunnel is up. Connection details live in the menu bar.")
+                          detail: "VPN tunnel is up. Live throughput and the connect log are below — "
+                                + "reopen this window any time from the menu bar.")
         case .dropped(let reason, _):
             sectionHeader(title: reason.dialogTitle, detail: reason.dialogDetail)
         case .authLocked:
@@ -227,6 +229,7 @@ struct ConnectionWindow: View {
                     Text("You can close this window.")
                         .foregroundStyle(.secondary)
                 }
+                MetricsBar(history: metrics.history)
                 LogView(entries: connectionManager.log)
                     .frame(minHeight: 100, maxHeight: .infinity)
             }
@@ -393,6 +396,230 @@ struct ConnectionWindow: View {
         // No auto-dismiss on success: the user wants to read the
         // activity log and click Close themselves. The `.connected`
         // content + footer already render that affordance.
+    }
+}
+
+// MARK: - MetricsBar
+
+/// Live tunnel performance as three stat tiles: a tinted glyph and
+/// caption, the figure large with its unit kept quiet beside it, and a
+/// sparkline of the last minute underneath.
+///
+/// The labels say "Down"/"Up" rather than "Speed" on purpose — this is
+/// passive throughput, the rate at which bytes are actually crossing
+/// ppp0, so an idle tunnel legitimately reads 0 bytes/s. Calling it
+/// speed would invite the user to read that zero as a broken link. The
+/// sparkline is what tells "quiet" apart from "stalled", which no
+/// single number can.
+private struct MetricsBar: View {
+    /// Oldest first. Empty until the first sample lands, about a second
+    /// after connecting.
+    let history: [LinkMetrics]
+
+    /// Floors for the sparkline scales, so a nearly-idle tunnel draws a
+    /// flat line instead of amplifying byte-level noise into a mountain
+    /// range. A graph that always looks dramatic says nothing.
+    private static let minimumRateScale: Double = 65_536   // 64 KB/s
+    private static let minimumLatencyScale: Double = 50    // ms
+
+    private var latest: LinkMetrics? { history.last }
+
+    /// Down and Up share one scale, deliberately. Scaling each to its
+    /// own maximum would draw an idle upstream as busy as a saturated
+    /// downstream — the tiles sit side by side and will be read against
+    /// each other, so a pixel has to mean the same in both.
+    private var rateScale: Double {
+        let peak = history.flatMap { [$0.downBytesPerSecond, $0.upBytesPerSecond] }.max() ?? 0
+        return max(peak, Self.minimumRateScale)
+    }
+
+    private var latencyScale: Double {
+        max(history.compactMap(\.latencyMilliseconds).max() ?? 0, Self.minimumLatencyScale)
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            tile(icon: "arrow.down", label: "Down", tint: .teal,
+                 parts: LinkMetrics.rateParts(latest?.downBytesPerSecond),
+                 series: history.map { $0.downBytesPerSecond }, scale: rateScale)
+
+            tile(icon: "arrow.up", label: "Up", tint: .indigo,
+                 parts: LinkMetrics.rateParts(latest?.upBytesPerSecond),
+                 series: history.map { $0.upBytesPerSecond }, scale: rateScale)
+
+            tile(icon: "timer", label: "Ping",
+                 // The grade means the same thing here as the status
+                 // dot's colour does in the menu bar.
+                 tint: LinkMetrics.latencyIndicator(latest?.latencyMilliseconds)?.color ?? .secondary,
+                 parts: LinkMetrics.latencyParts(latest?.latencyMilliseconds),
+                 // Unanswered ticks stay in the series as nils so the
+                 // gap shows and the axis keeps step with the two tiles
+                 // beside it. Plotting them as zero would draw a dead
+                 // probe as a perfect one; dropping them would slide the
+                 // rest of the trace across a different span of time.
+                 series: history.map(\.latencyMilliseconds), scale: latencyScale,
+                 grade: LinkMetrics.latencyIndicator(latest?.latencyMilliseconds))
+        }
+    }
+
+    private func tile(icon: String,
+                      label: String,
+                      tint: Color,
+                      parts: (value: String, unit: String),
+                      series: [Double?],
+                      scale: Double,
+                      grade: ConnectionState.Indicator? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            // Text concatenation rather than an HStack so the glyph
+            // sits on the caption's baseline instead of being centred
+            // against it.
+            (Text(Image(systemName: icon)).foregroundStyle(tint)
+             + Text("  \(label.uppercased())"))
+                .font(.caption2)
+                .fontWeight(.medium)
+                .tracking(0.6)
+                .foregroundStyle(.secondary)
+
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                Text(parts.value)
+                    // Monospaced digits: proportional ones re-lay the
+                    // row out on every sample, and at one sample a
+                    // second that reads as the whole bar twitching.
+                    .font(.system(size: 20, weight: .medium, design: .rounded).monospacedDigit())
+                    // The placeholder stays quiet. At this size and
+                    // weight a full-strength em dash is a heavy bar
+                    // that out-shouts the tiles which do have a
+                    // reading — the opposite of what it should do.
+                    .foregroundStyle(parts.value == LinkMetrics.unavailable ? .secondary : .primary)
+                if !parts.unit.isEmpty {
+                    Text(parts.unit)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Sparkline(values: series, maximum: scale)
+                .tint(tint)
+                .frame(height: 18)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // A translucent card, not the text-field surface LogView wears
+        // below it — these are readouts, not fields you could type into.
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityText(label: label, parts: parts, grade: grade))
+    }
+
+    /// The tint is the only thing carrying "this link is bad" to a
+    /// sighted user, so the grade has to be said out loud here.
+    private func accessibilityText(label: String,
+                                   parts: (value: String, unit: String),
+                                   grade: ConnectionState.Indicator?) -> String {
+        guard parts.value != LinkMetrics.unavailable else { return "\(label): not measured yet" }
+        let reading = parts.unit.isEmpty ? parts.value : "\(parts.value) \(parts.unit)"
+        guard let grade else { return "\(label): \(reading)" }
+        let verdict: String
+        switch grade {
+        case .ok:   verdict = "good"
+        case .warn: verdict = "fair"
+        case .bad:  verdict = "poor"
+        }
+        return "\(label): \(reading), \(verdict)"
+    }
+}
+
+// MARK: - Sparkline
+
+/// A sparkline over `values`, plotted by index and scaled against
+/// `maximum`: a filled area under a stroked line, both taking the
+/// ambient tint.
+///
+/// Hand-rolled rather than a `Chart`. A `Shape` is handed its rect
+/// directly, so there's no `GeometryReader`, nothing to lay out, and a
+/// 60-point polyline is a dozen lines of `Path` — against the axis,
+/// legend and plot-style machinery a chart would need stripped off,
+/// three tiles at a time, once a second.
+private struct Sparkline: View {
+    /// One entry per sample, `nil` where there's no measurement. Nils
+    /// break the line rather than being dropped: compacting them would
+    /// slide the remaining points across the full width, so this tile's
+    /// horizontal axis would cover a different span of time than the
+    /// ones beside it.
+    let values: [Double?]
+    let maximum: Double
+
+    private var hasTrend: Bool { values.compactMap { $0 }.count >= 2 && maximum > 0 }
+
+    var body: some View {
+        ZStack {
+            if hasTrend {
+                // A baseline, so a flat series at the bottom of the band
+                // reads as a graph sitting on its floor. Without it, an
+                // idle tunnel's line is indistinguishable from a stray
+                // horizontal rule under the number.
+                Rectangle()
+                    .fill(.tint.opacity(0.25))
+                    .frame(height: 1)
+                    .frame(maxHeight: .infinity, alignment: .bottom)
+            }
+            Line(values: values, maximum: maximum, closed: true)
+                .fill(.tint.opacity(0.18))
+            Line(values: values, maximum: maximum, closed: false)
+                .stroke(.tint, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+        }
+    }
+
+    private struct Line: Shape {
+        let values: [Double?]
+        let maximum: Double
+        /// Closed back down to the baseline, so the same points can be
+        /// filled as an area.
+        let closed: Bool
+
+        /// Fraction of the band the plot may use, leaving headroom at
+        /// the top. A series touching its own maximum would otherwise
+        /// graze the figure above it, and the round line cap would clip.
+        private static let plotHeightFraction: CGFloat = 0.88
+
+        func path(in rect: CGRect) -> Path {
+            var path = Path()
+            guard values.count >= 2, maximum > 0 else { return path }
+
+            // The x axis is samples, not seconds. A tick stretched by a
+            // latency probe is one even step here; carrying timestamps
+            // to correct an 18pt-tall graph isn't worth the arithmetic.
+            let step = rect.width / CGFloat(values.count - 1)
+            let plotHeight = rect.height * Self.plotHeightFraction
+
+            // Each run of consecutive measurements is its own subpath,
+            // so a stretch with no reading leaves a visible gap instead
+            // of being bridged by a line that was never measured.
+            var run: [CGPoint] = []
+            func flushRun() {
+                defer { run.removeAll(keepingCapacity: true) }
+                // One point is a dot, not a trend.
+                guard run.count >= 2, let first = run.first, let last = run.last else { return }
+                path.addLines(run)
+                guard closed else { return }
+                path.addLine(to: CGPoint(x: last.x, y: rect.maxY))
+                path.addLine(to: CGPoint(x: first.x, y: rect.maxY))
+                path.closeSubpath()
+            }
+
+            for (index, value) in values.enumerated() {
+                guard let value else {
+                    flushRun()
+                    continue
+                }
+                let fraction = min(max(value / maximum, 0), 1)
+                run.append(CGPoint(x: rect.minX + CGFloat(index) * step,
+                                   y: rect.maxY - plotHeight * CGFloat(fraction)))
+            }
+            flushRun()
+            return path
+        }
     }
 }
 
