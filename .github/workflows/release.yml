@@ -14,6 +14,9 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # scripts/changelog.sh walks history back to the previous tag.
+          fetch-depth: 0
 
       - name: Resolve version
         id: ver
@@ -52,15 +55,29 @@ jobs:
           shasum -a 256 *.tar.gz > checksums.txt
           cat checksums.txt
 
+      - name: Generate changelog
+        id: notes
+        # The markers let scripts/backfill-release-notes.sh rewrite the
+        # changelog in place without touching the rest of the body.
+        run: |
+          {
+            echo 'changelog<<CHANGELOG_EOF'
+            echo '<!-- changelog:start -->'
+            scripts/changelog.sh "${{ steps.ver.outputs.tag }}" "${{ github.repository }}"
+            echo '<!-- changelog:end -->'
+            echo 'CHANGELOG_EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             release/*.tar.gz
             release/checksums.txt
-          generate_release_notes: true
           fail_on_unmatched_files: true
           body: |
+            ${{ steps.notes.outputs.changelog }}
+
             ## Installation
 
             **macOS 14+ on Apple Silicon.**
