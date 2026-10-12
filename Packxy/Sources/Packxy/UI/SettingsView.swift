@@ -356,6 +356,7 @@ private struct GeneralPane: View {
 private struct ConnectionPane: View {
     @EnvironmentObject var appState: AppState
     @State private var showPassword = false
+    @State private var showChangePassword = false
 
     var body: some View {
         Form {
@@ -419,6 +420,9 @@ private struct ConnectionPane: View {
                     }
                     .frame(maxWidth: FieldWidth.credential)
                 }
+                LabeledContent("Domain password") {
+                    Button("Change…") { showChangePassword = true }
+                }
             } header: {
                 Text("Credentials")
             } footer: {
@@ -466,6 +470,11 @@ private struct ConnectionPane: View {
         .formStyle(.grouped)
         .scrollIndicators(.never)
         .padding(.trailing, 4)
+        .sheet(isPresented: $showChangePassword) {
+            ChangePasswordSheet()
+                .environmentObject(appState)
+                .environmentObject(appState.connectionManager)
+        }
     }
 }
 

@@ -29,7 +29,7 @@ final class AppState: ObservableObject {
     /// Without it the Settings action bar kept rendering the pre-save
     /// state — "Unsaved" dot up, Save/Revert enabled — until some
     /// unrelated change (switching panes) forced a re-render.
-    private var savedConfig: Config { didSet { refreshDirty() } }
+    private(set) var savedConfig: Config { didSet { refreshDirty() } }
 
     /// True once the connection window has been auto-opened at launch,
     /// so the one-shot `.task` on the menu-bar label doesn't re-fire if
@@ -103,5 +103,17 @@ final class AppState: ObservableObject {
     /// last persisted.
     func revertConfig() {
         config = savedConfig
+    }
+
+    /// Persists a new password without committing any other pending
+    /// edit: those stay in `config`, still flagged as unsaved. `config`
+    /// takes the password first, so a failed write still leaves the
+    /// next connect using it and the Save bar offering to retry.
+    func saveNewPassword(_ password: String) throws {
+        config.password = password
+        var updated = savedConfig
+        updated.password = password
+        try ConfigStore.save(updated)
+        savedConfig = updated
     }
 }

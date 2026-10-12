@@ -125,7 +125,8 @@ of it so you always know which build you're configuring:
   installed.
 - **Connection** — *Gateway*: host, port. *Credentials*: username and
   password, the latter with a show/hide eye so you can check what's
-  stored. *Advanced*: trusted cert (sha256 fingerprint), FortiGate
+  stored, and a **Change…** button for the domain password (see
+  below). *Advanced*: trusted cert (sha256 fingerprint), FortiGate
   realm, a **Disable FTM push** toggle, and an OTP-prompt override for
   gateways whose prompt wording openfortivpn doesn't match.
 - **Split tunneling** — *Routes*: the `VPN_ROUTES` list, add/remove,
@@ -348,6 +349,21 @@ misconfiguration into permanent traffic hijacking. The fourth means no
 answer at all, which points at `VPN_DNS` or the `VPN_DOMAINS` resolver
 files rather than at routing.
 
+### Changing the domain password
+
+**Settings → Connection → Credentials → Change…** changes the Active
+Directory password through the Kerberos change-password protocol (RFC
+3244). That is the protocol `kpasswd` uses, but Packxy calls it
+directly through Apple's GSS framework instead of running a terminal
+tool. The account defaults to `<username>@<first VPN_DOMAINS entry, upper-cased>`,
+e.g. `jdoe@CORP.LOCAL`. Edit it if your realm differs.
+
+The domain controller is found through the realm's `_kerberos` /
+`_kpasswd` DNS SRV records and reached over the tunnel, so the button
+only works while connected. On success, the new password is also saved
+as the VPN password unless you untick that option. The current session
+stays up.
+
 ## Config file
 
 `~/.config/packxy.conf` (mode 0600) — godotenv-style KEY=VALUE. The
@@ -417,10 +433,10 @@ Packxy/
                               OpenfortivpnDriver, NetworkConfig,
                               WindowActivation, AppDelegate,
                               PowerObserver, LinkMetrics,
-                              Notifications, …
+                              Notifications, PasswordChange, …
     UI/                       SettingsView, ConnectionWindow,
-                              MenuBarContent, EditableList,
-                              IndicatorColor
+                              ChangePasswordSheet, MenuBarContent,
+                              EditableList, IndicatorColor
 assets/icon.png               source for AppIcon.icns
 Makefile
 README.md
