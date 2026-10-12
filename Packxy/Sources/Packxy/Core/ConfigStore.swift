@@ -118,10 +118,30 @@ enum ConfigStore {
               let first = s.first,
               let last = s.last
         else { return s }
-        if (first == "\"" && last == "\"") || (first == "'" && last == "'") {
+        if first == "\"" && last == "\"" {
+            return unescape(s.dropFirst().dropLast())
+        }
+        if first == "'" && last == "'" {
             return String(s.dropFirst().dropLast())
         }
         return s
+    }
+
+    /// Reverses the `\\` / `\"` escaping `kv` applies inside double quotes.
+    private static func unescape(_ s: Substring) -> String {
+        var result = ""
+        var escaping = false
+        for ch in s {
+            if escaping {
+                result.append(ch)
+                escaping = false
+            } else if ch == "\\" {
+                escaping = true
+            } else {
+                result.append(ch)
+            }
+        }
+        return result
     }
 
     private static func splitCSV(_ s: String) -> [String] {
@@ -172,7 +192,7 @@ enum ConfigStore {
         if value.isEmpty {
             return "\(key)=\n"
         }
-        let needsQuotes = value.contains(where: { " \t#=,\"".contains($0) })
+        let needsQuotes = value.contains(where: { " \t#=,\"'\\".contains($0) })
         if needsQuotes {
             let escaped = value.replacingOccurrences(of: "\\", with: "\\\\")
                                .replacingOccurrences(of: "\"", with: "\\\"")
