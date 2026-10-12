@@ -16,6 +16,18 @@ SWIFT_BUILD_DIR := $(SWIFT_PKG)/.build/release
 # release workflow overrides it with the tag name.
 VERSION ?= dev
 
+# The macOS 27 SDK declares SwiftUI's @State as a macro whose plugin
+# (SwiftUIMacros) Command Line Tools don't ship, so a CLT-only build
+# fails on every @State. Pin the 26.5 SDK there until Apple ships it;
+# Xcode installs (CI) and an explicit SDKROOT are left alone.
+CLT_DIR := /Library/Developer/CommandLineTools
+PINNED_SDK := $(CLT_DIR)/SDKs/MacOSX26.5.sdk
+ifeq ($(shell xcode-select -p 2>/dev/null),$(CLT_DIR))
+ifneq ($(wildcard $(PINNED_SDK)),)
+export SDKROOT ?= $(PINNED_SDK)
+endif
+endif
+
 .PHONY: build clean run
 
 build:

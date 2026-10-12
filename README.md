@@ -398,6 +398,13 @@ sips/iconutil pipeline to wrap it into a proper `.app` bundle with an
 icon and `LSUIElement=YES` (menu-bar agent, no Dock tile). No full
 Xcode required.
 
+On a Command Line Tools–only machine, the build uses the macOS 26.5 SDK
+when it is installed, because the CLT don't ship the SwiftUI macro
+plugin the macOS 27 SDK needs. Set `SDKROOT` to use a different SDK.
+A plain `swift build` doesn't go through the Makefile, so prefix it the
+same way:
+`SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk swift build`.
+
 ## Layout
 
 ```
