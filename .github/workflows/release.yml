@@ -57,14 +57,10 @@ jobs:
 
       - name: Generate changelog
         id: notes
-        # The markers let scripts/backfill-release-notes.sh rewrite the
-        # changelog in place without touching the rest of the body.
         run: |
           {
             echo 'changelog<<CHANGELOG_EOF'
-            echo '<!-- changelog:start -->'
             scripts/changelog.sh "${{ steps.ver.outputs.tag }}" "${{ github.repository }}"
-            echo '<!-- changelog:end -->'
             echo 'CHANGELOG_EOF'
           } >> "$GITHUB_OUTPUT"
 
