@@ -13,6 +13,7 @@ struct MenuBarContent: View {
     @EnvironmentObject var connectionManager: ConnectionManager
     @EnvironmentObject var metrics: LinkMetricsStore
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
 
     /// Cap on how many comma-separated items we surface in the menu
     /// before collapsing into "X + N more"; keeps the dropdown narrow
@@ -34,7 +35,7 @@ struct MenuBarContent: View {
                 Divider()
             }
 
-            SettingsLink { Text("Settings…") }
+            Button("Settings…") { showSettingsWindow() }
                 .keyboardShortcut(",")
 
             Divider()
@@ -224,6 +225,15 @@ struct MenuBarContent: View {
     private func showConnectionWindow() {
         WindowActivation.present(.connection) {
             openWindow(id: WindowID.connection)
+        }
+    }
+
+    /// Not `SettingsLink`: it opens the window without telling
+    /// `WindowActivation`, so once the Settings window exists every later
+    /// open left it behind the frontmost app.
+    private func showSettingsWindow() {
+        WindowActivation.present(.settings) {
+            openSettings()
         }
     }
 }

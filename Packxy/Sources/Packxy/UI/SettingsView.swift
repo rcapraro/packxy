@@ -99,8 +99,8 @@ struct SettingsView: View {
         .frame(minWidth: 760, minHeight: 680)
         // Opts Settings into the .regular/.accessory policy flip and
         // brings its NSWindow forward + key on open — see
-        // WindowActivation. `SettingsLink` is opaque, so this is the
-        // only hook we get on this scene.
+        // WindowActivation. Also covers ⌘, from the app's own main menu,
+        // which opens Settings without going through the menu bar.
         .packxyWindow(.settings)
     }
 

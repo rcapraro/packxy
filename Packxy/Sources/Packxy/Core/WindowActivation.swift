@@ -94,8 +94,8 @@ enum WindowActivation {
 
     /// Called from a scene root's `.onAppear`. Covers a re-open where
     /// the NSView never left its NSWindow, so `viewDidMoveToWindow`
-    /// doesn't fire a second time — notably `SettingsLink`, which is
-    /// opaque by design and can't be routed through `present(_:open:)`.
+    /// doesn't fire a second time — e.g. Settings reopened by ⌘, from
+    /// the app's own main menu, which bypasses `present(_:open:)`.
     static func reveal(_ scene: Scene) {
         guard let window = windows[scene]?.value else { return }
         cancelPendingRevert()
