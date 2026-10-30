@@ -11,7 +11,6 @@ import SwiftUI
 struct MenuBarContent: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var connectionManager: ConnectionManager
-    @EnvironmentObject var metrics: LinkMetricsStore
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
 
@@ -80,35 +79,7 @@ struct MenuBarContent: View {
             // the row conditional would have it appear a beat later and
             // shove Routes / DNS / Disconnect down a slot, under a
             // cursor that's already moving toward one of them.
-            //
-            // Same concatenation constraint as the dot line above: an
-            // HStack here would be flattened into three separate rows.
-            let latest = metrics.latest
-            let down = LinkMetrics.rateText(latest?.downBytesPerSecond)
-            let up = LinkMetrics.rateText(latest?.upBytesPerSecond)
-            let ping = LinkMetrics.latencyText(latest?.latencyMilliseconds)
-            let pingTint = LinkMetrics.latencyIndicator(latest?.latencyMilliseconds)?.color
-            // Literal arrow characters rather than SF Symbols. As
-            // `Image(systemName:)` runs these rendered flat black —
-            // near-invisible in a dark menu — because the outer
-            // `.foregroundStyle` below does not reach an inline Image,
-            // and only the ping run carried one of its own. A per-run
-            // colour on each Image would likely have fixed it (that is
-            // what the dot line above does), but a text run takes its
-            // colour with no ambiguity at all, and in a menu that is
-            // worth more than the nicer glyph. The tints match the
-            // window's tiles so the two surfaces read as one readout.
-            (Text("↓").foregroundStyle(.teal)
-             + Text(" \(down)   ")
-             + Text("↑").foregroundStyle(.indigo)
-             + Text(" \(up)")
-             + Text("  ·  ")
-             + Text(ping).foregroundStyle(pingTint ?? .secondary))
-                .foregroundStyle(.secondary)
-                // Spelled out rather than left to VoiceOver, which
-                // would read the arrows as bare "down arrow" / "up
-                // arrow" glyphs stranded next to a number.
-                .accessibilityLabel("Down \(down), up \(up), ping \(ping)")
+            MetricsRow()
 
             if !cm.routes.isEmpty {
                 Text("Routes: \(summarize(cm.routes))")
@@ -235,5 +206,46 @@ struct MenuBarContent: View {
         WindowActivation.present(.settings) {
             openSettings()
         }
+    }
+}
+
+/// The live Down / Up / Ping row.
+///
+/// Its own view so that it alone observes the metrics store. The menu
+/// content stays alive while the menu is closed, so whatever observes
+/// the once-a-second sample is re-evaluated every tick — this row, not
+/// the whole menu.
+private struct MetricsRow: View {
+    @EnvironmentObject var metrics: LinkMetricsStore
+
+    var body: some View {
+        // Same concatenation constraint as the status dot line: an
+        // HStack here would be flattened into three separate rows.
+        let latest = metrics.latest
+        let down = LinkMetrics.rateText(latest?.downBytesPerSecond)
+        let up = LinkMetrics.rateText(latest?.upBytesPerSecond)
+        let ping = LinkMetrics.latencyText(latest?.latencyMilliseconds)
+        let pingTint = LinkMetrics.latencyIndicator(latest?.latencyMilliseconds)?.color
+        // Literal arrow characters rather than SF Symbols. As
+        // `Image(systemName:)` runs these rendered flat black —
+        // near-invisible in a dark menu — because the outer
+        // `.foregroundStyle` below does not reach an inline Image,
+        // and only the ping run carried one of its own. A per-run
+        // colour on each Image would likely have fixed it (that is
+        // what the dot line does), but a text run takes its
+        // colour with no ambiguity at all, and in a menu that is
+        // worth more than the nicer glyph. The tints match the
+        // window's tiles so the two surfaces read as one readout.
+        (Text("↓").foregroundStyle(.teal)
+         + Text(" \(down)   ")
+         + Text("↑").foregroundStyle(.indigo)
+         + Text(" \(up)")
+         + Text("  ·  ")
+         + Text(ping).foregroundStyle(pingTint ?? .secondary))
+            .foregroundStyle(.secondary)
+            // Spelled out rather than left to VoiceOver, which
+            // would read the arrows as bare "down arrow" / "up
+            // arrow" glyphs stranded next to a number.
+            .accessibilityLabel("Down \(down), up \(up), ping \(ping)")
     }
 }

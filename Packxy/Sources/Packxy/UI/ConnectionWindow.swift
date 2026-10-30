@@ -28,7 +28,6 @@ import SwiftUI
 struct ConnectionWindow: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var connectionManager: ConnectionManager
-    @EnvironmentObject var metrics: LinkMetricsStore
     @Environment(\.dismissWindow) private var dismissWindow
     /// `.key` when *this* view's NSWindow is the key window. Used to
     /// re-assert OTP focus after AppKit's become-key first-responder
@@ -229,7 +228,7 @@ struct ConnectionWindow: View {
                     Text("You can close this window.")
                         .foregroundStyle(.secondary)
                 }
-                MetricsBar(history: metrics.history)
+                MetricsBar()
                 LogView(entries: connectionManager.log)
                     .frame(minHeight: 100, maxHeight: .infinity)
             }
@@ -411,10 +410,16 @@ struct ConnectionWindow: View {
 /// speed would invite the user to read that zero as a broken link. The
 /// sparkline is what tells "quiet" apart from "stalled", which no
 /// single number can.
+///
+/// Observes the metrics store itself, not a history handed down by
+/// `ConnectionWindow`, so the once-a-second sample re-evaluates only
+/// these tiles rather than the window's header, log and footer too.
 private struct MetricsBar: View {
+    @EnvironmentObject var metrics: LinkMetricsStore
+
     /// Oldest first. Empty until the first sample lands, about a second
     /// after connecting.
-    let history: [LinkMetrics]
+    private var history: [LinkMetrics] { metrics.history }
 
     /// Floors for the sparkline scales, so a nearly-idle tunnel draws a
     /// flat line instead of amplifying byte-level noise into a mountain
