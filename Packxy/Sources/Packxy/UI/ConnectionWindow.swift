@@ -179,21 +179,23 @@ struct ConnectionWindow: View {
         }
     }
 
+    /// The app icon follows the macOS grid, so its tile fills only the
+    /// middle ~80% of the image. 42pt makes the visible tile span from
+    /// the title's cap height to the bottom of the detail line.
+    private static let appIconSize: CGFloat = 42
+
     @ViewBuilder
     private var appIcon: some View {
-        // 36pt sits comfortably between the body text height and the
-        // title size; the 44pt NSAlert default was visually dominant
-        // in this compact window.
         if let ns = NSImage(named: NSImage.applicationIconName) {
             Image(nsImage: ns)
                 .resizable()
-                .frame(width: 36, height: 36)
+                .frame(width: Self.appIconSize, height: Self.appIconSize)
                 .accessibilityHidden(true)
         } else {
             Image(systemName: "shield.lefthalf.filled")
-                .font(.system(size: 26, weight: .medium))
+                .font(.system(size: 32, weight: .medium))
                 .foregroundStyle(.tint)
-                .frame(width: 36, height: 36)
+                .frame(width: Self.appIconSize, height: Self.appIconSize)
                 .accessibilityHidden(true)
         }
     }
