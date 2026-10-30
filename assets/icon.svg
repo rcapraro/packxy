@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#C13FB6"/>
+      <stop offset="0.5" stop-color="#8E78C8"/>
+      <stop offset="1" stop-color="#4DD3DC"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.22"/>
+      <stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="tileShadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="10"/>
+      <feOffset dy="10"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.3"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="glyphShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="14"/>
+      <feOffset dy="12" result="offsetBlur"/>
+      <feFlood flood-color="#3A1460" flood-opacity="0.3"/>
+      <feComposite operator="in" in2="offsetBlur"/>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <path id="shield" d="M512 286
+      C572 318 640 334 708 338
+      L708 482
+      C708 616 628 700 512 740
+      C396 700 316 616 316 482
+      L316 338
+      C384 334 452 318 512 286 Z"/>
+    <clipPath id="leftHalf"><rect x="0" y="0" width="512" height="1024"/></clipPath>
+  </defs>
+
+  <g filter="url(#tileShadow)">
+    <rect x="100" y="100" width="824" height="824" rx="185.4" fill="url(#bg)"/>
+  </g>
+  <rect x="100" y="100" width="824" height="824" rx="185.4" fill="url(#sheen)"/>
+
+  <g filter="url(#glyphShadow)">
+    <use href="#shield" fill="none" stroke="#FFFFFF" stroke-width="44" stroke-linejoin="round"/>
+    <use href="#shield" fill="#FFFFFF" clip-path="url(#leftHalf)"/>
+  </g>
+</svg>

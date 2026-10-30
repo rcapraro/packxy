@@ -511,6 +511,8 @@ Packxy/
     UI/                       SettingsView, ConnectionWindow,
                               ChangePasswordSheet, MenuBarContent,
                               EditableList, IndicatorColor
+assets/icon.svg               vector source of icon.png
+                              (rsvg-convert -w 1024 -h 1024)
 assets/icon.png               source for AppIcon.icns
 scripts/
   changelog.sh                release notes for one tag
